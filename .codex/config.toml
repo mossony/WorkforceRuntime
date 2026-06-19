@@ -1,0 +1,9 @@
+# Project-local Codex settings for Workforce Runtime.
+#
+# Codex intentionally ignores provider/auth keys in project-local config files.
+# Use the user-level profile `~/.codex/workforce-openrouter.config.toml` with:
+#
+#   codex --profile workforce-openrouter exec ...
+#
+# Future project-local MCP settings can live here once the Workforce Runtime MCP
+# server exists.

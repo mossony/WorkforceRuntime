@@ -1,0 +1,61 @@
+company:
+  name: Tiny Status Workforce
+  mission: Complete a small writing task with visible delegation and replay.
+  headcount_limit: 4
+  token_budget: 200000
+
+agents:
+  - id: ceo
+    name: CEO Agent
+    role: CEO
+    department: Executive
+    manager_id: null
+    worker_type: generic_cli
+    model: openai/gpt-oss-120b:free
+    responsibilities:
+      - Convert human goals into manager assignments
+      - Review final business outcome
+    permissions:
+      - delegate_task
+      - report
+    budget:
+      max_tokens: 50000
+      max_runtime_seconds: 1800
+      max_tool_calls: 30
+
+  - id: product_manager
+    name: Product Manager Agent
+    role: Product Manager
+    department: Product
+    manager_id: ceo
+    worker_type: generic_cli
+    model: openai/gpt-oss-120b:free
+    responsibilities:
+      - Scope small product tasks
+      - Assign work to the terminal worker
+      - Check worker progress
+    permissions:
+      - delegate_task
+      - report
+    budget:
+      max_tokens: 50000
+      max_runtime_seconds: 1800
+      max_tool_calls: 30
+
+  - id: laguna_worker
+    name: Laguna Worker
+    role: Writing Worker
+    department: Product
+    manager_id: product_manager
+    worker_type: generic_cli
+    model: poolside/laguna-xs.2:free
+    responsibilities:
+      - Produce concise written artifacts
+      - Submit artifacts and report completion
+    permissions:
+      - submit_artifact
+      - report
+    budget:
+      max_tokens: 25000
+      max_runtime_seconds: 900
+      max_tool_calls: 20

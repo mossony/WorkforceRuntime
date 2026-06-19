@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workforce-runtime"
+version = "0.1.0"
+description = "Organization runtime for coordinating third-party AI worker agents."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+workforce-runtime = "workforce_runtime.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["workforce_runtime*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

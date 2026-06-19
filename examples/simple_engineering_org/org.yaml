@@ -1,0 +1,125 @@
+company:
+  name: Demo Workforce
+  mission: Build software using AI workers.
+  headcount_limit: 8
+  token_budget: 600000
+
+agents:
+  - id: ceo
+    name: CEO Agent
+    role: CEO
+    department: Executive
+    manager_id: null
+    worker_type: generic_cli
+    responsibilities:
+      - Own company-level goals
+      - Allocate budget
+      - Review executive reports
+    permissions:
+      - delegate_task
+      - approve_budget
+      - hire_agent
+      - report
+    budget:
+      max_tokens: 100000
+      max_runtime_seconds: 7200
+      max_tool_calls: 100
+
+  - id: vp_engineering
+    name: VP Engineering Agent
+    role: VP Engineering
+    department: Engineering
+    manager_id: ceo
+    worker_type: generic_cli
+    responsibilities:
+      - Break engineering goals into projects
+      - Manage engineering execution
+    permissions:
+      - delegate_task
+      - request_budget
+      - review_report
+    budget:
+      max_tokens: 150000
+      max_runtime_seconds: 10800
+      max_tool_calls: 200
+
+  - id: hr_manager
+    name: HR Manager Agent
+    role: HR Manager
+    department: People
+    manager_id: ceo
+    worker_type: generic_cli
+    responsibilities:
+      - Evaluate hiring requests
+      - Create new workers and managers
+      - Track headcount and budget constraints
+    permissions:
+      - hire_agent
+      - delegate_task
+      - report
+      - request_budget
+    budget:
+      max_tokens: 30000
+      max_runtime_seconds: 3600
+      max_tool_calls: 60
+
+  - id: engineering_manager
+    name: Engineering Manager Agent
+    role: Engineering Manager
+    department: Engineering
+    manager_id: vp_engineering
+    worker_type: generic_cli
+    responsibilities:
+      - Assign implementation tasks
+      - Review worker reports
+      - Escalate blockers
+    permissions:
+      - delegate_task
+      - request_budget
+      - report
+    budget:
+      max_tokens: 80000
+      max_runtime_seconds: 7200
+      max_tool_calls: 120
+
+  - id: codex_worker
+    name: Codex Worker
+    role: Software Engineer
+    department: Engineering
+    manager_id: engineering_manager
+    worker_type: codex
+    responsibilities:
+      - Implement code changes
+      - Run tests
+      - Submit artifacts and reports
+    permissions:
+      - read_repo
+      - write_branch
+      - run_tests
+      - submit_artifact
+      - report
+    budget:
+      max_tokens: 50000
+      max_runtime_seconds: 3600
+      max_tool_calls: 80
+
+  - id: claude_worker
+    name: Claude Worker
+    role: Software Engineer
+    department: Engineering
+    manager_id: engineering_manager
+    worker_type: claude_code
+    responsibilities:
+      - Investigate bugs
+      - Produce implementation plans
+      - Submit artifacts and reports
+    permissions:
+      - read_repo
+      - write_branch
+      - run_tests
+      - submit_artifact
+      - report
+    budget:
+      max_tokens: 50000
+      max_runtime_seconds: 3600
+      max_tool_calls: 80

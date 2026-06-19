@@ -8,6 +8,101 @@ The goal is not to build another coding agent, another agent loop, or another pr
 
 In the initial version, Workforce Runtime does not implement its own agent loop. All worker agents are third-party executors such as **Codex** and **Claude Code**. Workforce Runtime provides the organizational structure, task lifecycle, reporting protocol, MCP interface, worker adapters, budget control, permission model, and human-readable execution logs.
 
+## Public Alpha Quickstart
+
+This public alpha README explains what Workforce Runtime is, what it is not, how to run the demo, how to define an org chart, how to add a worker adapter, how MCP reporting works, and how Codex and Claude Code fit into the architecture.
+
+Install the package in editable mode:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e ".[dev]"
+```
+
+Run the packaged mock-worker demo:
+
+```bash
+workforce-runtime --db .workforce_runtime/demo.sqlite demo sample-repo-fix
+```
+
+Run the smaller status/trajectory demo:
+
+```bash
+workforce-runtime --db .workforce_runtime/simple.sqlite demo simple-status
+```
+
+Run the web research demo, which fetches a public IANA page and shows MCP tool-call activity:
+
+```bash
+workforce-runtime --db .workforce_runtime/web.sqlite demo web-research --workspace .workforce_runtime/demo/web-research
+```
+
+Inspect the resulting organization dashboard:
+
+```bash
+workforce-runtime --db .workforce_runtime/demo.sqlite dashboard
+workforce-runtime --db .workforce_runtime/web.sqlite dashboard --serve
+workforce-runtime --db .workforce_runtime/demo.sqlite dashboard --watch --iterations 5
+workforce-runtime --db .workforce_runtime/demo.sqlite dashboard --replay
+workforce-runtime --db .workforce_runtime/demo.sqlite dashboard --trajectories
+```
+
+The parser demo creates a small git workspace, assigns a planning task to an engineering manager, delegates a parser bug fix to a worker, receives MCP reports and artifacts, runs manager review, and prints a text dashboard. The smaller status demo uses management agents routed to `openai/gpt-oss-120b:free` and a terminal worker routed to `poolside/laguna-xs.2:free` as local metadata, then prints dashboard snapshots, event replay, and per-agent trajectories. The web research demo uses real network access plus MCP `assign`, `check_progress`, `get_task_context`, `discuss`, `submit_artifact`, and `report` calls.
+
+Worker adapters stream stdout/stderr into runtime events while they run, and manager-style external executors can stream `agent_output` events. The web dashboard shows an org chart, per-agent output, per-agent MCP tool activity, agent run state, event replay, and trajectories. If the local Codex desktop app is installed, Codex workers use its app icon in the org chart.
+
+## How It Differs From Ordinary Agent Frameworks
+
+Most agent frameworks focus on the worker loop: prompting, tool choice, planning, and execution. Workforce Runtime focuses on the management layer above workers: org charts, task contracts, reporting lines, budget limits, permissions, artifacts, review, and audit logs. Codex, Claude Code, or another CLI agent can be plugged in as replaceable workers.
+
+## Core Files
+
+- `examples/simple_engineering_org/org.yaml` defines the sample company, HR, managers, workers, budgets, and permissions.
+- `workforce_runtime/server/runtime.py` owns task assignment, reports, artifacts, reviews, budget checks, and permission checks.
+- `workforce_runtime/mcp/server.py` exposes worker-facing MCP tools.
+- `workforce_runtime/workers/` contains the generic CLI, Codex, and Claude Code adapters.
+- `workforce_runtime/dashboard/text_dashboard.py` renders the local text dashboard.
+
+## Defining An Org Chart
+
+Create a YAML file with a `company` section and an `agents` list. Each agent has an `id`, `name`, `role`, `department`, `manager_id`, `worker_type`, `responsibilities`, `permissions`, and `budget`. See `examples/simple_engineering_org/org.yaml`.
+
+Initialize a runtime database:
+
+```bash
+workforce-runtime --db .workforce_runtime/runtime.sqlite init --org examples/simple_engineering_org/org.yaml
+workforce-runtime --db .workforce_runtime/runtime.sqlite org print examples/simple_engineering_org/org.yaml
+```
+
+## Adding A Worker Adapter
+
+Worker adapters translate a `TaskContract` into an external executor invocation, run inside a workspace, capture stdout/stderr, collect artifacts, and register a `ReportContract`. Start from `GenericCLIWorker` if the executor can read environment variables and call the MCP server. See `WORKER_ADAPTERS.md`.
+
+## MCP Reporting
+
+Workers report through line-delimited JSON-RPC over stdio:
+
+```bash
+workforce-runtime --db .workforce_runtime/runtime.sqlite mcp serve
+```
+
+The current organization tools are `report`, `assign`, `discuss`, `check_progress`, `hire`, and `update_system_prompt`. The worker support tools are `submit_artifact`, `update_status`, `request_budget`, `request_permission`, `get_task_context`, and `get_org_context`. See `MCP_TOOLS.md`.
+
+Default system prompts are generated by Workforce Runtime from the company mission, role, manager, responsibilities, and permissions when the org is loaded or HR hires a new agent. A manager can edit the system prompt of any subordinate through `update_system_prompt`; the edit is recorded as an event.
+
+## Codex And Claude Code
+
+Codex and Claude Code are treated as third-party worker processes. Workforce Runtime does not replace their native agent loops; it launches them with a structured task prompt, captures their outputs, records artifacts, and expects final reports. The Codex adapter defaults to the `workforce-openrouter` profile, which can point official Codex at OpenRouter's `openai/gpt-oss-120b:free` model. See `docs/CODEX_AGENT_INTEGRATION.md` and `WORKER_ADAPTERS.md`.
+
+## Alpha Docs
+
+- `QUICKSTART.md`: install, demo, dashboard, and first inspection commands.
+- `MCP_TOOLS.md`: worker-facing tool protocol.
+- `WORKER_ADAPTERS.md`: generic CLI, Codex, Claude Code, and adapter extension notes.
+- `EXAMPLES.md`: packaged demo and example org.
+- `ROADMAP.md`: current alpha scope and next milestones.
+
 ---
 
 ## 1. Vision

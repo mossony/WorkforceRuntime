@@ -1,0 +1,13 @@
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+artifacts/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
