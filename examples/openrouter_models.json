@@ -1,0 +1,28 @@
+{
+  "models": {
+    "openai/gpt-oss-120b:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 131072,
+      "max_output_tokens": 131072,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "source": "https://openrouter.ai/openai/gpt-oss-120b:free"
+    },
+    "poolside/laguna-m.1:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 262144,
+      "max_output_tokens": 32768,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "source": "https://openrouter.ai/poolside/laguna-m.1:free"
+    },
+    "poolside/laguna-xs.2:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 262144,
+      "max_output_tokens": 32768,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "source": "https://openrouter.ai/poolside/laguna-xs.2:free"
+    }
+  }
+}

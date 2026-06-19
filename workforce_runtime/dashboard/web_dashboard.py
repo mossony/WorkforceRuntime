@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from workforce_runtime.config import model_capabilities
 from workforce_runtime.core.organization import Company
 from workforce_runtime.dashboard.config import load_dashboard_config, merge_dashboard_config
 from workforce_runtime.dashboard.summaries import total_budget_usage, worker_performance
@@ -337,6 +338,7 @@ def _org_chart(agents: list[Any], activity: dict[str, dict[str, Any]], config: d
             "department": agent.department,
             "status": agent.status,
             "model": agent.model,
+            "model_capabilities": model_capabilities(agent.model) or {},
             "worker_type": agent.worker_type,
             "icon": _agent_icon(agent, config),
             "current_task_ids": list(agent.current_task_ids),
@@ -1050,6 +1052,7 @@ HTML = r"""<!doctype html>
               <div>
                 <div class="agent-name">${esc(node.name)}</div>
                 <div class="agent-meta">${esc(node.role)} - ${esc(node.worker_type)} - ${esc(node.model || "no model")}</div>
+                <div class="agent-meta">${esc(renderModelLimit(node.model_capabilities))}</div>
                 <div class="agent-meta">tasks: ${esc(work)}</div>
               </div>
             </div>
@@ -1090,6 +1093,16 @@ HTML = r"""<!doctype html>
         return `<img class="agent-icon" src="${esc(icon.image_url)}" alt="${label}" title="${label}" onerror="this.outerHTML='<span class=&quot;agent-icon-fallback&quot; title=&quot;${label}&quot;>${label.slice(0, 3)}</span>'">`;
       }
       return `<span class="agent-icon-fallback" title="${label}">${label.slice(0, 3)}</span>`;
+    }
+
+    function renderModelLimit(capabilities) {
+      const context = capabilities?.context_window_tokens;
+      const output = capabilities?.max_output_tokens;
+      if (!context && !output) return "model limits: unknown";
+      const parts = [];
+      if (context) parts.push(`context ${Number(context).toLocaleString()} tokens`);
+      if (output) parts.push(`output ${Number(output).toLocaleString()} tokens`);
+      return `model limits: ${parts.join(", ")}`;
     }
 
     function renderActivityBlock(title, items, renderItem) {

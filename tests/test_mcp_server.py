@@ -65,6 +65,18 @@ def test_mcp_server_report_tool_end_to_end(tmp_path: Path) -> None:
         )
         assert "report" in {tool["name"] for tool in tools["result"]["tools"]}
 
+        org_context = send_request(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": 31,
+                "method": "tools/call",
+                "params": {"name": "get_org_context", "arguments": {}},
+            },
+        )
+        agent_context = org_context["result"]["structuredContent"]["agents"][0]
+        assert "model_capabilities" in agent_context
+
         report = send_request(
             process,
             {

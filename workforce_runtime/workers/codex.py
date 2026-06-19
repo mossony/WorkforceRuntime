@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+from workforce_runtime.config import format_model_context_note
 from workforce_runtime.core import Artifact, ReportContract, TaskContract, UsageCost
 from workforce_runtime.storage import FileStore
 from workforce_runtime.workers.base import RuntimeContext, WorkerRun
@@ -161,10 +162,14 @@ class CodexWorker:
         return self._usage[run_id]
 
     def _build_prompt(self, task: TaskContract, runtime_context: RuntimeContext) -> str:
+        agent = runtime_context.runtime.get_agent(runtime_context.agent_id)
+        model = agent.model if agent is not None else ""
         return f"""You are an AI worker inside Workforce Runtime.
 
 Your agent id is: {runtime_context.agent_id}
 Your manager is: {runtime_context.manager_id or "human"}
+Your assigned model is: {model or "runtime default"}.
+{format_model_context_note(model)}
 Your assigned task is:
 
 {task.model_dump_json(indent=2)}

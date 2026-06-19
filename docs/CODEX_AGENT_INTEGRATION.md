@@ -57,6 +57,26 @@ workspace-write exec ...`.
 
 Codex supports custom model providers and can talk to providers compatible with OpenAI model APIs. OpenRouter's documented example uses Chat Completions with `reasoning: {"enabled": true}`. Codex's public config documents provider URL, env key, headers, query params, model, and Codex reasoning settings, but does not document a provider-specific arbitrary JSON body override for that OpenRouter `reasoning` field. The initial adapter should verify the model in a smoke run before relying on reasoning details continuity.
 
+## Model Context Limits
+
+OpenRouter model context windows are model metadata, not Workforce Runtime
+budgets. OpenRouter request `max_tokens` / `max_completion_tokens` only limits
+how many output tokens a response may generate; it does not enlarge the model
+context window.
+
+Workforce Runtime keeps known OpenRouter model limits in
+`examples/openrouter_models.json` and the matching default registry in
+`workforce_runtime/config/model_registry.py`. Generated agent prompts include a
+short model-limit note when the assigned model is known, for example
+`openai/gpt-oss-120b:free` has a 131,072-token context window and
+`poolside/laguna-m.1:free` has a 262,144-token context window with up to 32,768
+output tokens.
+
+Codex itself should still manage its own compaction and request shaping. The
+runtime-provided model-limit note is an operating hint for planning context,
+large artifacts, and delegation. It should not be treated as a hard budget;
+agent/task/company `max_tokens` fields remain spending and allocation controls.
+
 ## Later MCP Wiring
 
 After Phase 5, Codex should be launched with the Workforce Runtime MCP server configured in Codex config for the task workspace. The task prompt should require the worker to call:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from workforce_runtime.config import format_model_context_note
 from workforce_runtime.core.agent_profile import AgentProfile
 from workforce_runtime.core.organization import Company
 from workforce_runtime.core.permissions import HIRE_AGENT
@@ -20,6 +21,7 @@ def generate_system_prompt(company: Company, agent: AgentProfile) -> str:
         [
             f"You are {agent.name}, the {agent.role} in {company.name}.",
             f"Assigned model: {agent.model or 'runtime default'}.",
+            format_model_context_note(agent.model),
             f"Company mission: {company.mission or 'not specified'}.",
             reporting_line,
             "",

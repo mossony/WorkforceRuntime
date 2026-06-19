@@ -35,8 +35,10 @@ def test_org_loader_generates_role_specific_system_prompts(tmp_path: Path) -> No
     assert hr is not None
     assert worker is not None
     assert "CEO guidance" in ceo.system_prompt
+    assert "Model context window: unknown" in ceo.system_prompt
     assert "HR guidance" in hr.system_prompt
     assert "Worker guidance" in worker.system_prompt
+    assert "Model context window: unknown" in worker.system_prompt
     assert "Use report() to send completion status to your direct manager." in worker.system_prompt
 
 
@@ -194,6 +196,7 @@ def test_hr_hire_respects_company_budget_and_generates_prompt(tmp_path: Path) ->
 
         assert hired.manager_id == "engineering_manager"
         assert "Worker guidance" in hired.system_prompt
+        assert "Model context window: unknown" in hired.system_prompt
 
         with pytest.raises(ValueError, match="token budget"):
             runtime.hire_agent(

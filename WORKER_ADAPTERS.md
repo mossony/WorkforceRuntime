@@ -65,6 +65,12 @@ env_key = "OPENROUTER_API_KEY"
 
 Keep `OPENROUTER_API_KEY` in the shell environment, such as `.zshrc`, not in repository files. See `docs/CODEX_AGENT_INTEGRATION.md`.
 
+Model context limits are configured separately from runtime budgets. See
+`examples/openrouter_models.json` for the JSON model registry and
+`workforce_runtime/config/model_registry.py` for the built-in defaults used in
+generated prompts and MCP context responses. OpenRouter `max_tokens` is an
+output cap, not the model context window.
+
 ## Claude Code Worker
 
 `ClaudeCodeWorker` launches Claude Code in print mode:
