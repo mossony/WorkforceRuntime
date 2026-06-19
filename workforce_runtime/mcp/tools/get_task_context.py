@@ -8,7 +8,7 @@ def get_task_context(runtime: WorkforceRuntime, arguments: dict[str, object]) ->
     task = runtime.require_task(str(arguments["task_id"]))
     reports = runtime.store.list_reports_by_task(task.task_id)
     artifacts = runtime.store.list_artifacts_by_task(task.task_id)
-    actor_id = str(arguments.get("actor_id") or "")
+    actor_id = str(arguments.get("actor_id") or arguments.get("agent_id") or "")
     actor = runtime.get_agent(actor_id) if actor_id else None
     return {
         "ok": True,

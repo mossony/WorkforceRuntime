@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import time
 import threading
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import pytest
 
@@ -126,6 +127,7 @@ def test_web_dashboard_http_endpoints(tmp_path: Path) -> None:
         html = urlopen(f"http://{host}:{port}/", timeout=5).read().decode()
         state = json.loads(urlopen(f"http://{host}:{port}/api/state", timeout=5).read().decode())
         config = json.loads(urlopen(f"http://{host}:{port}/api/config", timeout=5).read().decode())
+        demo_status = json.loads(urlopen(f"http://{host}:{port}/api/demos/long-rfc/status", timeout=5).read().decode())
         events = json.loads(urlopen(f"http://{host}:{port}/api/events?after=0", timeout=5).read().decode())
         if CODEX_ICON_PATH.exists():
             codex_icon = urlopen(f"http://{host}:{port}/assets/agent-icons/codex.png", timeout=5).read()
@@ -141,9 +143,12 @@ def test_web_dashboard_http_endpoints(tmp_path: Path) -> None:
     assert "Live Agent Output" in html
     assert "agent-detail" in html
     assert "Details" in html
+    assert "Start Long RFC Demo" in html
     assert state["company"]["name"] == "Demo Workforce"
     assert state["config"]["dashboard"]["refresh_interval_ms"] == 1234
     assert config["dashboard"]["collapse_depth"] == 1
+    assert demo_status["demo"] == "long-rfc"
+    assert demo_status["status"] == "idle"
     assert "agents" in state
     assert "event_replay" in state
     assert events["cursor"] >= 1
@@ -162,3 +167,39 @@ def test_dashboard_config_json_merges_defaults(tmp_path: Path) -> None:
     assert config["summaries"]["llm"]["model"] == "openai/gpt-oss-120b:free"
     assert config["icons"]["poolside"]["label"] == "Laguna"
     assert config["dashboard"]["max_visible_agents"] == 80
+
+
+def test_web_dashboard_can_start_long_rfc_demo(tmp_path: Path) -> None:
+    db_path = tmp_path / "runtime.sqlite"
+    source = tmp_path / "source.txt"
+    source.write_text("Local RFC fixture.")
+
+    try:
+        server = make_web_dashboard_server(db_path, host="127.0.0.1", port=0)
+    except PermissionError as exc:
+        pytest.skip(f"sandbox disallows local socket binding: {exc}")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    try:
+        request = Request(
+            f"http://{host}:{port}/api/demos/long-rfc/start",
+            data=json.dumps({"url": source.as_uri(), "delay_seconds": 0}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        started = json.loads(urlopen(request, timeout=5).read().decode())
+        assert started["status"] == "running"
+
+        status = started
+        deadline = time.monotonic() + 10
+        while status["running"] and time.monotonic() < deadline:
+            time.sleep(0.1)
+            status = json.loads(urlopen(f"http://{host}:{port}/api/demos/long-rfc/status", timeout=5).read().decode())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert status["status"] == "completed"
+    assert status["result"]["final_status"] == "completed"

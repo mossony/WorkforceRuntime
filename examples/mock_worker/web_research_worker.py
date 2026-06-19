@@ -46,7 +46,7 @@ def main() -> None:
     manager_id = os.environ.get("WORKFORCE_MANAGER_ID") or "engineering_manager"
 
     task = json.loads(task_path.read_text())
-    url = os.environ.get("WORKFORCE_WEB_RESEARCH_URL", "https://www.iana.org/help/example-domains")
+    url = os.environ.get("WORKFORCE_WEB_RESEARCH_URL") or _task_url(task) or "https://www.iana.org/help/example-domains"
     artifact_path = workspace / "artifacts" / task["task_id"] / "web_research_summary.md"
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -170,6 +170,18 @@ def main() -> None:
 
     print(json.dumps(response["result"]["structuredContent"]), flush=True)
     raise SystemExit(0 if status == "completed" else 1)
+
+
+def _task_url(task: dict[str, object]) -> str:
+    fields: list[str] = []
+    for key in ("objective", "title"):
+        if task.get(key):
+            fields.append(str(task[key]))
+    for key in ("constraints", "acceptance_criteria", "context_refs"):
+        for item in task.get(key) or []:
+            fields.append(str(item))
+    match = re.search(r"https?://[^\s,`]+|file://[^\s,`]+", "\n".join(fields))
+    return match.group(0) if match else ""
 
 
 if __name__ == "__main__":

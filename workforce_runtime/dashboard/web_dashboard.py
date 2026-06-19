@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
 import time
+import traceback
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,6 +16,7 @@ from workforce_runtime.core.organization import Company
 from workforce_runtime.dashboard.config import load_dashboard_config, merge_dashboard_config
 from workforce_runtime.dashboard.summaries import total_budget_usage, worker_performance
 from workforce_runtime.dashboard.text_dashboard import render_agent_trajectories
+from workforce_runtime.server.long_rfc_demo import DEFAULT_RFC_URL, run_long_rfc_demo
 from workforce_runtime.server.runtime import WorkforceRuntime
 from workforce_runtime.storage.sqlite_store import SequencedEvent
 from workforce_runtime.storage import SQLiteStore
@@ -86,6 +89,82 @@ def make_web_dashboard_server(
 ) -> ThreadingHTTPServer:
     db = Path(db_path)
     dashboard_config = load_dashboard_config(config_path) if config_path is not None else merge_dashboard_config(config)
+    demo_lock = threading.Lock()
+    demo_status: dict[str, Any] = {
+        "ok": True,
+        "demo": "long-rfc",
+        "running": False,
+        "status": "idle",
+        "run_id": "",
+        "workspace": "",
+        "started_at": "",
+        "finished_at": "",
+        "error": "",
+        "result": {},
+    }
+
+    def start_long_rfc_demo(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        nonlocal demo_status
+        with demo_lock:
+            if demo_status.get("running"):
+                return HTTPStatus.CONFLICT, demo_status
+            run_id = f"long-rfc-{int(time.time())}"
+            workspace = Path(
+                str(payload.get("workspace") or db.parent / "dashboard_demo_runs" / run_id)
+            )
+            url = str(payload.get("url") or DEFAULT_RFC_URL)
+            delay_seconds = float(payload.get("delay_seconds", 0.8))
+            demo_status = {
+                "ok": True,
+                "demo": "long-rfc",
+                "running": True,
+                "status": "running",
+                "run_id": run_id,
+                "workspace": str(workspace),
+                "started_at": _timestamp(),
+                "finished_at": "",
+                "error": "",
+                "result": {},
+            }
+        thread = threading.Thread(
+            target=run_long_rfc_demo_background,
+            args=(run_id, workspace, url, delay_seconds),
+            daemon=True,
+        )
+        thread.start()
+        return HTTPStatus.ACCEPTED, demo_status
+
+    def run_long_rfc_demo_background(run_id: str, workspace: Path, url: str, delay_seconds: float) -> None:
+        nonlocal demo_status
+        try:
+            result = run_long_rfc_demo(db, workspace=workspace, url=url, delay_seconds=delay_seconds)
+            with demo_lock:
+                if demo_status.get("run_id") == run_id:
+                    demo_status = {
+                        **demo_status,
+                        "running": False,
+                        "status": "completed",
+                        "finished_at": _timestamp(),
+                        "result": result,
+                    }
+        except Exception as exc:  # noqa: BLE001 - dashboard should surface demo failures.
+            error = str(exc)
+            with WorkforceRuntime(db) as runtime:
+                runtime.record_event(
+                    event_type="demo_run_failed",
+                    actor_id="system",
+                    payload={"demo": "long-rfc", "run_id": run_id, "error": _single_line(error, 500)},
+                )
+            with demo_lock:
+                if demo_status.get("run_id") == run_id:
+                    demo_status = {
+                        **demo_status,
+                        "running": False,
+                        "status": "failed",
+                        "finished_at": _timestamp(),
+                        "error": error,
+                        "traceback": traceback.format_exc(),
+                    }
 
     class DashboardHandler(BaseHTTPRequestHandler):
         def handle(self) -> None:
@@ -109,6 +188,10 @@ def make_web_dashboard_server(
                 return
             if parsed.path == "/api/config":
                 self._send_json(dashboard_config)
+                return
+            if parsed.path == "/api/demos/long-rfc/status":
+                with demo_lock:
+                    self._send_json(dict(demo_status))
                 return
             if parsed.path == "/api/events":
                 query = parse_qs(parsed.query)
@@ -141,12 +224,32 @@ def make_web_dashboard_server(
                 return
             self.send_error(HTTPStatus.NOT_FOUND, "not found")
 
+        def do_POST(self) -> None:  # noqa: N802
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/demos/long-rfc/start":
+                status, payload = start_long_rfc_demo(self._read_json_body())
+                self._send_json(payload, status=status)
+                return
+            self.send_error(HTTPStatus.NOT_FOUND, "not found")
+
         def log_message(self, _format: str, *_args: object) -> None:
             return
 
-        def _send_json(self, payload: dict[str, Any]) -> None:
+        def _read_json_body(self) -> dict[str, Any]:
+            length = int(self.headers.get("Content-Length") or "0")
+            if length <= 0:
+                return {}
+            raw = self.rfile.read(length).decode()
+            if not raw.strip():
+                return {}
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError("JSON body must be an object")
+            return payload
+
+        def _send_json(self, payload: dict[str, Any], *, status: int = HTTPStatus.OK) -> None:
             body = json.dumps(payload).encode()
-            self.send_response(HTTPStatus.OK)
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
@@ -592,6 +695,10 @@ def _single_line(text: str, limit: int) -> str:
     return compact[: limit - 3] + "..."
 
 
+def _timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
 HTML = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -663,6 +770,41 @@ HTML = r"""<!doctype html>
     .span-12 { grid-column: span 12; }
     .metric { font-size: 22px; font-weight: 650; margin-top: 6px; }
     .muted { color: var(--muted); }
+    .demo-panel {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .demo-copy {
+      min-width: 260px;
+      max-width: 760px;
+    }
+    .demo-title {
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+    .demo-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .primary-button {
+      background: var(--accent);
+      color: #ffffff;
+      border-color: var(--accent);
+      font-weight: 700;
+    }
+    .primary-button:hover {
+      background: #0b5f59;
+      color: #ffffff;
+    }
+    .primary-button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
     th { color: var(--muted); font-weight: 600; font-size: 12px; }
@@ -911,6 +1053,18 @@ HTML = r"""<!doctype html>
     <section class="grid" id="metrics"></section>
     <section class="grid">
       <div class="panel span-12">
+        <div class="demo-panel">
+          <div class="demo-copy">
+            <div class="demo-title">Long RFC Demo</div>
+            <div class="muted">Starts a predefined CEO -> COO -> VP -> Manager -> Worker research workflow in this dashboard database.</div>
+          </div>
+          <div class="demo-actions">
+            <button class="primary-button" id="start-long-rfc-demo" data-action="start-long-rfc-demo">Start Long RFC Demo</button>
+            <span class="pill" id="long-rfc-demo-status">idle</span>
+          </div>
+        </div>
+      </div>
+      <div class="panel span-12">
         <div class="org-toolbar">
           <h2>Org Chart</h2>
           <div class="muted" id="org-summary"></div>
@@ -985,6 +1139,7 @@ HTML = r"""<!doctype html>
     let collapsedNodes = new Set();
     let selectedAgentId = null;
     let visibleNodeCount = 0;
+    let longRfcDemoStatus = { status: "idle", running: false };
 
     function deepMerge(base, override) {
       const result = {...base};
@@ -1011,6 +1166,40 @@ HTML = r"""<!doctype html>
       document.getElementById("output").innerHTML = liveOutput.slice(-cfg("activity", "global_output_limit", 200)).map(o =>
         `<div class="output-line"><span class="pill">${esc(o.task_id || "-")} ${esc(o.agent_id)} ${esc(o.stream || "output")}</span> ${esc(o.text || "")}</div>`
       ).join("") || `<div class="muted">No agent output.</div>`;
+    }
+
+    function renderDemoStatus() {
+      const label = document.getElementById("long-rfc-demo-status");
+      const button = document.getElementById("start-long-rfc-demo");
+      if (!label || !button) return;
+      const status = longRfcDemoStatus?.status || "idle";
+      const runId = longRfcDemoStatus?.run_id ? ` ${longRfcDemoStatus.run_id}` : "";
+      const result = longRfcDemoStatus?.result?.final_status ? ` final=${longRfcDemoStatus.result.final_status}` : "";
+      const error = longRfcDemoStatus?.error ? ` error=${clip(longRfcDemoStatus.error, 90)}` : "";
+      label.textContent = `${status}${runId}${result}${error}`;
+      button.disabled = Boolean(longRfcDemoStatus?.running);
+    }
+
+    async function refreshDemoStatus() {
+      const res = await fetch("/api/demos/long-rfc/status", { cache: "no-store" });
+      longRfcDemoStatus = await res.json();
+      renderDemoStatus();
+    }
+
+    async function startLongRfcDemo() {
+      longRfcDemoStatus = { status: "starting", running: true };
+      renderDemoStatus();
+      const res = await fetch("/api/demos/long-rfc/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      longRfcDemoStatus = await res.json();
+      if (!res.ok && !longRfcDemoStatus.error) {
+        longRfcDemoStatus.error = `HTTP ${res.status}`;
+      }
+      renderDemoStatus();
+      await refresh();
     }
 
     function renderOrgChart() {
@@ -1365,6 +1554,7 @@ HTML = r"""<!doctype html>
       ]));
       renderOutput();
       renderAgentDetail();
+      await refreshDemoStatus();
       document.getElementById("replay").textContent = data.event_replay;
       document.getElementById("trajectories").textContent = data.trajectories;
       connectStream();
@@ -1395,6 +1585,12 @@ HTML = r"""<!doctype html>
           expandedNodes.delete(agentId);
         }
         renderOrgChart();
+      }
+      if (action === "start-long-rfc-demo") {
+        startLongRfcDemo().catch(err => {
+          longRfcDemoStatus = { status: "failed", running: false, error: String(err) };
+          renderDemoStatus();
+        });
       }
     });
 
