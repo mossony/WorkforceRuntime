@@ -71,7 +71,7 @@ def main() -> None:
         title = html.unescape(" ".join(title_match.group(1).split())) if title_match else "untitled page"
         for domain in ("example.com", "example.net", "example.org"):
             if domain in text:
-                fact_lines.append(f"- Observed `{domain}` on the fetched IANA page.")
+                fact_lines.append(f"- Observed `{domain}` on the fetched source page.")
         print(f"fetched {byte_count} bytes; title={title}", flush=True)
     except Exception as exc:  # noqa: BLE001 - demo worker should report network failures.
         status = "failed"
