@@ -99,7 +99,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "dashboard":
         if args.serve:
-            serve_web_dashboard(args.db, host=args.host, port=args.port)
+            serve_web_dashboard(args.db, host=args.host, port=args.port, config_path=args.config)
             return
         with WorkforceRuntime(args.db) as runtime:
             if args.replay:
@@ -138,7 +138,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "mcp" and args.mcp_command == "dashboard":
-        serve_web_dashboard(args.db, host=args.host, port=args.port)
+        serve_web_dashboard(args.db, host=args.host, port=args.port, config_path=args.config)
         return
 
     if args.command == "task" and args.task_command == "create":
