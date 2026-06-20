@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+from workforce_runtime.config import load_runtime_config
 from workforce_runtime.core import Artifact, ReportContract, TaskContract, UsageCost
 from workforce_runtime.storage import FileStore
 from workforce_runtime.workers.base import RuntimeContext, WorkerRun
@@ -15,11 +16,12 @@ class ClaudeCodeWorker:
     def __init__(
         self,
         *,
-        claude_executable: str = "claude",
+        claude_executable: str | None = None,
         timeout_seconds: int | None = None,
     ) -> None:
-        self.claude_executable = claude_executable
-        self.timeout_seconds = timeout_seconds
+        config = load_runtime_config().get("workers", {}).get("claude_code", {})
+        self.claude_executable = claude_executable or str(config.get("executable") or "claude")
+        self.timeout_seconds = timeout_seconds if timeout_seconds is not None else config.get("timeout_seconds")
         self._runs: dict[str, WorkerRun] = {}
         self._usage: dict[str, dict[str, int]] = {}
 
@@ -29,7 +31,11 @@ class ClaudeCodeWorker:
     def start_task(self, task: TaskContract, runtime_context: RuntimeContext) -> WorkerRun:
         run_id = f"run_{uuid4().hex[:12]}"
         file_store = FileStore(runtime_context.workspace)
-        task_dir = file_store.task_artifact_dir(task.task_id)
+        task_dir = file_store.agent_task_run_dir(
+            agent_id=runtime_context.agent_id,
+            task_id=task.task_id,
+            run_id=run_id,
+        )
         task_contract_path = task_dir / "task_contract.json"
         final_message_path = task_dir / "claude-final.md"
         task_contract_path.write_text(task.model_dump_json(indent=2))
@@ -60,6 +66,7 @@ class ClaudeCodeWorker:
             task_id=task.task_id,
             agent_id=runtime_context.agent_id,
             timeout_message="claude worker timed out",
+            run_dir=task_dir,
         )
         returncode = streamed.returncode
         stdout_path = streamed.stdout_path
@@ -138,7 +145,11 @@ class ClaudeCodeWorker:
 
     def collect_artifacts(self, run_id: str) -> list[Path]:
         run = self._runs[run_id]
-        return sorted(run.stdout_path.parent.iterdir())
+        paths = list(run.stdout_path.parent.iterdir())
+        legacy_dir = FileStore(FileStore.workspace_from_run_file(run.stdout_path)).task_artifact_dir(run.task_id)
+        if legacy_dir.exists():
+            paths.extend(legacy_dir.iterdir())
+        return sorted(set(paths))
 
     def stop_task(self, run_id: str) -> None:
         if run_id not in self._runs:

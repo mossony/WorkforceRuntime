@@ -31,6 +31,7 @@ def run_process_streaming(
     task_id: str,
     agent_id: str,
     timeout_message: str,
+    run_dir: Path | None = None,
 ) -> StreamedProcessResult:
     runtime.record_worker_run_started(
         run_id=run_id,
@@ -75,13 +76,14 @@ def run_process_streaming(
                 stdout_chunks.append(data)
             else:
                 stderr_chunks.append(data)
-            runtime.record_worker_output(
-                run_id=run_id,
-                task_id=task_id,
-                actor_id=agent_id,
-                stream=stream,
-                text=data.decode(errors="replace"),
-            )
+            for text in _stream_text_chunks(data.decode(errors="replace")):
+                runtime.record_worker_output(
+                    run_id=run_id,
+                    task_id=task_id,
+                    actor_id=agent_id,
+                    stream=stream,
+                    text=text,
+                )
 
         if process.poll() is not None and not selector.get_map():
             break
@@ -100,8 +102,15 @@ def run_process_streaming(
 
     stdout = b"".join(stdout_chunks).decode(errors="replace")
     stderr = b"".join(stderr_chunks).decode(errors="replace")
-    stdout_path = file_store.save_worker_stdout(task_id, stdout)
-    stderr_path = file_store.save_worker_stderr(task_id, stderr)
+    stdout_path = file_store.save_worker_stdout(task_id, stdout, agent_id=agent_id, run_id=run_id)
+    stderr_path = file_store.save_worker_stderr(task_id, stderr, agent_id=agent_id, run_id=run_id)
+    if run_dir is not None:
+        runtime.record_event(
+            event_type="agent_run_path_registered",
+            actor_id=agent_id,
+            task_id=task_id,
+            payload={"run_id": run_id, "run_dir": str(run_dir), "stdout_path": str(stdout_path), "stderr_path": str(stderr_path)},
+        )
     runtime.record_worker_run_finished(
         run_id=run_id,
         task_id=task_id,
@@ -116,3 +125,18 @@ def run_process_streaming(
         stderr_path=stderr_path,
         timed_out=timed_out,
     )
+
+
+def _stream_text_chunks(text: str) -> list[str]:
+    if not text:
+        return []
+    parts: list[str] = []
+    current = ""
+    for char in text:
+        current += char
+        if char.isspace():
+            parts.append(current)
+            current = ""
+    if current:
+        parts.append(current)
+    return parts

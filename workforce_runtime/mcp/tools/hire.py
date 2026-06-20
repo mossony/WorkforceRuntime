@@ -21,6 +21,7 @@ def hire(runtime: WorkforceRuntime, arguments: dict[str, object]) -> dict[str, o
         department=str(source["department"]),
         manager_id=str(source["manager_id"]),
         worker_type=str(source["worker_type"]),
+        model=str(source.get("model") or ""),
         responsibilities=[str(item) for item in source.get("responsibilities") or []],
         permissions=[str(item) for item in source.get("permissions") or []],
         budget=Budget(

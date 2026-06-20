@@ -5,11 +5,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from workforce_runtime.core.agent_profile import AgentProfile
+from workforce_runtime.core.agent_personal_profile import AgentPersonalProfile
 from workforce_runtime.core.artifact import Artifact
 from workforce_runtime.core.events import Event
 from workforce_runtime.core.organization import Company
 from workforce_runtime.core.report import ReportContract
 from workforce_runtime.core.task import TaskContract
+from workforce_runtime.core.task_document import TaskDocument
+from workforce_runtime.core.task_trace import TaskTraceExport
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,11 @@ class SQLiteStore:
                 payload TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS agent_personal_profiles (
+                agent_id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS tasks (
                 task_id TEXT PRIMARY KEY,
                 payload TEXT NOT NULL
@@ -66,6 +74,20 @@ class SQLiteStore:
             CREATE TABLE IF NOT EXISTS artifacts (
                 artifact_id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS task_documents (
+                doc_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS task_trace_exports (
+                trace_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                exported_at TEXT NOT NULL,
+                path TEXT NOT NULL,
                 payload TEXT NOT NULL
             );
 
@@ -114,6 +136,30 @@ class SQLiteStore:
     def list_agents(self) -> list[AgentProfile]:
         rows = self._conn.execute("SELECT payload FROM agents ORDER BY id").fetchall()
         return [AgentProfile.model_validate_json(row["payload"]) for row in rows]
+
+    def save_agent_personal_profile(self, profile: AgentPersonalProfile) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO agent_personal_profiles (agent_id, payload)
+            VALUES (?, ?)
+            ON CONFLICT(agent_id) DO UPDATE SET payload = excluded.payload
+            """,
+            (profile.agent_id, profile.model_dump_json()),
+        )
+        self._conn.commit()
+
+    def get_agent_personal_profile(self, agent_id: str) -> AgentPersonalProfile | None:
+        row = self._conn.execute(
+            "SELECT payload FROM agent_personal_profiles WHERE agent_id = ?",
+            (agent_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return AgentPersonalProfile.model_validate_json(row["payload"])
+
+    def list_agent_personal_profiles(self) -> list[AgentPersonalProfile]:
+        rows = self._conn.execute("SELECT payload FROM agent_personal_profiles ORDER BY agent_id").fetchall()
+        return [AgentPersonalProfile.model_validate_json(row["payload"]) for row in rows]
 
     def save_task(self, task: TaskContract) -> None:
         self._conn.execute(
@@ -223,3 +269,65 @@ class SQLiteStore:
     def list_artifacts(self) -> list[Artifact]:
         rows = self._conn.execute("SELECT payload FROM artifacts ORDER BY artifact_id").fetchall()
         return [Artifact.model_validate_json(row["payload"]) for row in rows]
+
+    def save_task_document(self, document: TaskDocument) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO task_documents (doc_id, task_id, payload)
+            VALUES (?, ?, ?)
+            ON CONFLICT(doc_id) DO UPDATE SET
+                task_id = excluded.task_id,
+                payload = excluded.payload
+            """,
+            (document.doc_id, document.task_id, document.model_dump_json()),
+        )
+        self._conn.commit()
+
+    def get_task_document(self, doc_id: str) -> TaskDocument | None:
+        row = self._conn.execute("SELECT payload FROM task_documents WHERE doc_id = ?", (doc_id,)).fetchone()
+        if row is None:
+            return None
+        return TaskDocument.model_validate_json(row["payload"])
+
+    def list_task_documents_by_task(self, task_id: str) -> list[TaskDocument]:
+        rows = self._conn.execute(
+            "SELECT payload FROM task_documents WHERE task_id = ? ORDER BY doc_id",
+            (task_id,),
+        ).fetchall()
+        return [TaskDocument.model_validate_json(row["payload"]) for row in rows]
+
+    def list_task_documents(self) -> list[TaskDocument]:
+        rows = self._conn.execute("SELECT payload FROM task_documents ORDER BY doc_id").fetchall()
+        return [TaskDocument.model_validate_json(row["payload"]) for row in rows]
+
+    def save_task_trace_export(self, trace: TaskTraceExport) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO task_trace_exports (trace_id, task_id, exported_at, path, payload)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(trace_id) DO UPDATE SET
+                task_id = excluded.task_id,
+                exported_at = excluded.exported_at,
+                path = excluded.path,
+                payload = excluded.payload
+            """,
+            (trace.trace_id, trace.task_id, trace.exported_at.isoformat(), trace.path, trace.model_dump_json()),
+        )
+        self._conn.commit()
+
+    def get_task_trace_export(self, trace_id: str) -> TaskTraceExport | None:
+        row = self._conn.execute("SELECT payload FROM task_trace_exports WHERE trace_id = ?", (trace_id,)).fetchone()
+        if row is None:
+            return None
+        return TaskTraceExport.model_validate_json(row["payload"])
+
+    def list_task_trace_exports_by_task(self, task_id: str) -> list[TaskTraceExport]:
+        rows = self._conn.execute(
+            "SELECT payload FROM task_trace_exports WHERE task_id = ? ORDER BY exported_at, trace_id",
+            (task_id,),
+        ).fetchall()
+        return [TaskTraceExport.model_validate_json(row["payload"]) for row in rows]
+
+    def list_task_trace_exports(self) -> list[TaskTraceExport]:
+        rows = self._conn.execute("SELECT payload FROM task_trace_exports ORDER BY exported_at, trace_id").fetchall()
+        return [TaskTraceExport.model_validate_json(row["payload"]) for row in rows]

@@ -20,6 +20,7 @@ agents:
       - approve_budget
       - hire_agent
       - report
+      - report_to_human
     budget:
       max_tokens: 100000
       max_runtime_seconds: 7200

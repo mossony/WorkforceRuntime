@@ -72,13 +72,13 @@ def test_text_dashboard_shows_phase_9_sections(tmp_path: Path) -> None:
     assert "Organization:" in dashboard
     assert "Codex Worker" in dashboard
     assert "Active Agents:" in dashboard
-    assert "Codex Worker  busy  task_001" in dashboard
+    assert f"Codex Worker  busy  {active_task.task_id}" in dashboard
     assert "Idle Agents:" in dashboard
     assert "Claude Worker  idle  -" in dashboard
     assert "Active Tasks:" in dashboard
-    assert "task_001  Investigate parser  assigned  Codex Worker" in dashboard
+    assert f"{active_task.task_id}  Investigate parser  assigned  Codex Worker" in dashboard
     assert "Completed Tasks:" in dashboard
-    assert "task_002  Write summary  completed  Claude Worker" in dashboard
+    assert f"{completed_task.task_id}  Write summary  completed  Claude Worker" in dashboard
     assert "Recent Reports:" in dashboard
     assert "No-tools summary completed." in dashboard
     assert "Recent Artifacts:" in dashboard
@@ -94,4 +94,4 @@ def test_text_dashboard_shows_phase_9_sections(tmp_path: Path) -> None:
     assert "permission_requested" in replay
     assert "Agent Trajectories" in trajectories
     assert "Claude Worker" in trajectories
-    assert "reported report_001 on task_002: completed" in trajectories
+    assert f"reported report_001 on {completed_task.task_id}: completed" in trajectories

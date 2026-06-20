@@ -5,46 +5,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from workforce_runtime.config.runtime_config import DEFAULT_RUNTIME_CONFIG, dashboard_config_from_runtime
 
-DEFAULT_DASHBOARD_CONFIG: dict[str, Any] = {
-    "dashboard": {
-        "refresh_interval_ms": 5000,
-        "max_visible_agents": 80,
-        "collapse_depth": 3,
-        "show_idle_activity": True,
-    },
-    "activity": {
-        "recent_event_limit": 300,
-        "event_scan_limit": 1200,
-        "recent_output_items": 12,
-        "recent_tool_items": 12,
-        "recent_event_items": 10,
-        "full_stream_limit": 200,
-        "global_output_limit": 200,
-        "worker_output_limit": 80,
-    },
-    "summaries": {
-        "mode": "local",
-        "max_chars": 140,
-        "active_window_seconds": 120,
-        "llm": {
-            "provider": "openrouter",
-            "base_url": "https://openrouter.ai/api/v1/chat/completions",
-            "model": "openai/gpt-oss-120b:free",
-            "api_key_env": "OPENROUTER_API_KEY",
-            "reasoning_enabled": True,
-            "stream": False,
-        },
-    },
-    "icons": {
-        "codex": {"label": "Codex", "image_url": "/assets/agent-icons/codex.png"},
-        "claude": {"label": "Claude", "image_url": ""},
-        "poolside": {"label": "Pool", "image_url": ""},
-        "manager": {"label": "Mgr", "image_url": ""},
-        "executive": {"label": "CEO", "image_url": ""},
-        "generic": {"label": "AI", "image_url": ""},
-    },
-}
+DEFAULT_DASHBOARD_CONFIG: dict[str, Any] = dashboard_config_from_runtime(DEFAULT_RUNTIME_CONFIG)
 
 
 def load_dashboard_config(path: str | Path | None = None) -> dict[str, Any]:
@@ -56,6 +19,8 @@ def load_dashboard_config(path: str | Path | None = None) -> dict[str, Any]:
     overrides = json.loads(config_path.read_text())
     if not isinstance(overrides, dict):
         raise ValueError(f"dashboard config must be a JSON object: {config_path}")
+    if any(key in overrides for key in ("runtime", "openrouter", "org_designer", "workers", "benchmarks")):
+        return merge_dashboard_config(dashboard_config_from_runtime(overrides))
     return merge_dashboard_config(overrides)
 
 

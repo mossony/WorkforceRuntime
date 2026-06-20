@@ -13,9 +13,10 @@ This guide gets a new checkout to the public alpha demo.
 ## Install
 
 ```bash
-python3 -m venv .venv
+python3 -m pip install --user uv  # only if uv is not already installed
+uv venv
 source .venv/bin/activate
-python3 -m pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
 ## Run The Mock Worker Demo
@@ -34,6 +35,30 @@ workforce-runtime --db .workforce_runtime/simple.sqlite demo simple-status
 
 This demo uses a CEO and product manager routed to `openai/gpt-oss-120b:free`, a terminal worker routed to `poolside/laguna-xs.2:free`, a progress check, dashboard snapshots, event replay, and per-agent trajectories.
 
+## Run A Real LLM Benchmark
+
+Set `OPENROUTER_API_KEY`, then run:
+
+```bash
+workforce-runtime --db .workforce_runtime/benchmark.sqlite benchmark run \
+  --case examples/benchmarks/web_research_real_llm.json \
+  --workspace .workforce_runtime/benchmark/workspace \
+  --use-llm --judge heuristic
+```
+
+This designs a small org, runs real OpenRouter manager and worker steps, fetches the public IANA example domains page, submits an artifact, records manager review, and prints structured benchmark scores. The web dashboard has a `Start Real LLM Benchmark` button for the same packaged case.
+
+## Configure Runtime Defaults
+
+All user-adjustable Workforce Runtime defaults are collected in one JSON file:
+
+```bash
+cp examples/workforce_runtime_config.json workforce_runtime_config.json
+workforce-runtime --config workforce_runtime_config.json --db .workforce_runtime/demo.sqlite dashboard --serve
+```
+
+The web dashboard can load and save this same config file from the `Runtime Config` panel.
+
 ## Inspect The Dashboard
 
 ```bash
@@ -45,6 +70,15 @@ workforce-runtime --db .workforce_runtime/demo.sqlite dashboard --trajectories
 
 The dashboard shows company context, active/completed/failed tasks, reports, artifacts, decision inbox, budget overruns, worker performance, and recent events.
 When a worker is running, `dashboard --watch` also shows worker run state and recent stdout/stderr chunks streamed from the adapter.
+
+## Design An Org From A Goal
+
+```bash
+workforce-runtime org design \
+  --goal "Research a public RFC and produce an evidence-backed summary" \
+  --headcount-limit 6 \
+  --use-llm
+```
 
 ## Inspect The Organization
 

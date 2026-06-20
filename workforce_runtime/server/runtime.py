@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from workforce_runtime.core import (
+    AgentExperience,
+    AgentPersonalProfile,
     AgentProfile,
     Artifact,
     Budget,
     Event,
     Organization,
     ReportContract,
+    TaskDocument,
     TaskContract,
     TaskStatus,
     generate_system_prompt,
 )
-from workforce_runtime.core.permissions import DELEGATE_TASK, REPORT, SUBMIT_ARTIFACT, Capability
+from workforce_runtime.core.permissions import DELEGATE_TASK, REPORT, REPORT_TO_HUMAN, SUBMIT_ARTIFACT, Capability
 from workforce_runtime.scheduler.manager_review import ManagerReviewDecision, ManagerReviewPolicy
 from workforce_runtime.storage import SQLiteStore, load_org_from_yaml
 
@@ -36,13 +41,17 @@ class WorkforceRuntime:
 
     def initialize_org(self, org_path: str | Path) -> Organization:
         organization = load_org_from_yaml(org_path)
+        return self.initialize_organization(organization, source=str(org_path))
+
+    def initialize_organization(self, organization: Organization, *, source: str = "direct") -> Organization:
         self.store.save_company(organization.company)
         for agent in organization.agents:
             self.store.save_agent(agent)
+            self._ensure_agent_personal_profile(agent.id, updated_by="system")
         self.record_event(
             event_type="org_initialized",
             actor_id="system",
-            payload={"org_path": str(org_path), "agent_count": len(organization.agents)},
+            payload={"org_path": source, "agent_count": len(organization.agents)},
         )
         return organization
 
@@ -70,7 +79,7 @@ class WorkforceRuntime:
             self.require_manager_of(assigned_by, assign_to)
 
         task = TaskContract(
-            task_id=self._next_task_id(),
+            task_id=self._next_task_id(title),
             title=title,
             objective=objective,
             assigned_to=assign_to,
@@ -139,6 +148,8 @@ class WorkforceRuntime:
             task_id=task_id,
             payload={"status": status},
         )
+        if status in {"completed", "failed", "cancelled"}:
+            self._refresh_related_task_trace_exports(task_id)
         return updated
 
     def require_task(self, task_id: str) -> TaskContract:
@@ -150,6 +161,99 @@ class WorkforceRuntime:
     def list_tasks(self) -> list[TaskContract]:
         return self.store.list_tasks()
 
+    def upsert_task_document(
+        self,
+        *,
+        actor_id: str,
+        task_id: str,
+        title: str,
+        content: str,
+        doc_type: str = "note",
+        doc_id: str | None = None,
+    ) -> TaskDocument:
+        self.require_task_access(actor_id, task_id)
+        existing = self.store.get_task_document(doc_id) if doc_id else None
+        if existing is not None and existing.task_id != task_id:
+            raise ValueError(f"document {doc_id} belongs to another task")
+
+        values = {
+            "doc_id": doc_id or f"doc_{uuid4().hex[:12]}",
+            "task_id": task_id,
+            "title": title,
+            "doc_type": doc_type,
+            "content": content,
+            "created_by": existing.created_by if existing is not None else actor_id,
+            "updated_by": actor_id,
+            "version": (existing.version + 1) if existing is not None else 1,
+        }
+        if existing is not None:
+            values["created_at"] = existing.created_at
+        document = TaskDocument.model_validate(values)
+
+        self.store.save_task_document(document)
+        self.record_event(
+            event_type="task_document_upserted",
+            actor_id=actor_id,
+            task_id=task_id,
+            payload={
+                "doc_id": document.doc_id,
+                "doc_type": document.doc_type,
+                "title": title,
+                "version": document.version,
+            },
+        )
+        self._refresh_related_task_trace_exports(task_id)
+        return document
+
+    def list_task_documents(self, task_id: str, *, actor_id: str = "runtime") -> list[TaskDocument]:
+        self.require_task_access(actor_id, task_id)
+        return self.store.list_task_documents_by_task(task_id)
+
+    def get_task_dossier(
+        self,
+        *,
+        actor_id: str,
+        task_id: str,
+        include_events: bool = True,
+        event_limit: int = 20,
+    ) -> dict[str, object]:
+        self.require_task_access(actor_id, task_id)
+        task = self.require_task(task_id)
+        child_tasks = [item for item in self.store.list_tasks() if item.parent_task_id == task_id]
+        documents = self.store.list_task_documents_by_task(task_id)
+        reports = self.store.list_reports_by_task(task_id)
+        artifacts = self.store.list_artifacts_by_task(task_id)
+        events = [
+            event
+            for event in self.store.list_events()
+            if event.task_id == task_id
+            or event.payload.get("task_id") == task_id
+            or event.payload.get("parent_task_id") == task_id
+        ]
+        return {
+            "ok": True,
+            "task": task.model_dump(mode="json"),
+            "requirements": {
+                "constraints": task.constraints,
+                "acceptance_criteria": task.acceptance_criteria,
+                "required_artifacts": task.required_artifacts,
+            },
+            "division_of_work": [
+                {
+                    "task_id": item.task_id,
+                    "title": item.title,
+                    "assigned_to": item.assigned_to,
+                    "assigned_by": item.assigned_by,
+                    "status": item.status,
+                }
+                for item in child_tasks
+            ],
+            "documents": [document.model_dump(mode="json") for document in documents],
+            "reports": [report.model_dump(mode="json") for report in reports],
+            "artifacts": [artifact.model_dump(mode="json") for artifact in artifacts],
+            "recent_events": [event.model_dump(mode="json") for event in events[-event_limit:]] if include_events else [],
+        }
+
     def register_report(self, report: ReportContract) -> None:
         self.require_permission(report.from_agent_id, REPORT, task_id=report.task_id)
         expected_recipient = self.get_report_recipient(report.from_agent_id)
@@ -158,6 +262,8 @@ class WorkforceRuntime:
                 f"reports from {report.from_agent_id} must go to direct manager {expected_recipient}"
             )
         self.store.save_report(report)
+        if report.status.lower() in {"completed", "done", "success", "succeeded"}:
+            self._auto_update_agent_personal_profile_from_report(report)
         self.record_event(
             event_type="report_registered",
             actor_id=report.from_agent_id,
@@ -169,6 +275,118 @@ class WorkforceRuntime:
             self._record_budget_overrun_if_needed(task, report)
         if task is not None and not self._is_review_task(task):
             self._create_and_run_manager_review(task, report)
+        self._refresh_related_task_trace_exports(report.task_id)
+
+    def _ensure_agent_personal_profile(self, agent_id: str, *, updated_by: str) -> AgentPersonalProfile:
+        agent = self.store.get_agent(agent_id)
+        if agent is None:
+            raise KeyError(f"agent not found: {agent_id}")
+        existing = self.store.get_agent_personal_profile(agent_id)
+        if existing is not None:
+            return existing
+        profile = AgentPersonalProfile(
+            agent_id=agent_id,
+            summary=agent.performance_summary,
+            knows_about=[],
+            can_do=list(agent.responsibilities),
+            specialty_tags=_profile_tags_from_text(" ".join([agent.role, agent.department, *agent.responsibilities])),
+            preferred_tools=[],
+            boundaries=[],
+            updated_by=updated_by,
+        )
+        self.store.save_agent_personal_profile(profile)
+        return profile
+
+    def require_agent_profile_access(self, actor_id: str, agent_id: str) -> None:
+        if actor_id in {"human", "system", "runtime"}:
+            return
+        if actor_id == agent_id:
+            return
+        if self.is_manager_of(actor_id, agent_id):
+            return
+        self.record_event(
+            event_type="permission_violation",
+            actor_id=actor_id,
+            payload={"capability": "agent_profile_access", "target_agent_id": agent_id},
+        )
+        raise PermissionError(f"agent {actor_id} cannot access profile for {agent_id}")
+
+    def _auto_update_agent_personal_profile_from_report(self, report: ReportContract) -> None:
+        task = self.store.get_task(report.task_id)
+        title = task.title if task is not None else ""
+        objective = task.objective if task is not None else ""
+        skills = _profile_tags_from_text(" ".join([title, objective, report.summary, *report.work_done]))
+        evidence = [
+            str(item.get("path"))
+            for item in report.evidence
+            if isinstance(item, dict) and item.get("path")
+        ][:6]
+        experience = AgentExperience(
+            task_id=report.task_id,
+            title=title,
+            summary=report.summary,
+            outcome=report.status,
+            skills=skills,
+            evidence=evidence,
+            confidence=report.confidence,
+        )
+        knows_about = [title, objective, *report.work_done]
+        can_do = [report.summary, *report.work_done]
+        profile = self.update_agent_personal_profile(
+            actor_id="runtime",
+            agent_id=report.from_agent_id,
+            summary=f"Recent completed work: {report.summary}",
+            knows_about=knows_about,
+            can_do=can_do,
+            specialty_tags=skills,
+            experience=experience,
+        )
+        agent = self.store.get_agent(report.from_agent_id)
+        if agent is not None:
+            updated_agent = agent.model_copy(update={"performance_summary": profile.summary or report.summary})
+            self.store.save_agent(updated_agent)
+
+    def report_to_human(
+        self,
+        *,
+        from_agent_id: str,
+        message: str,
+        task_id: str | None = None,
+        title: str = "",
+        status: str = "",
+        confidence: float | None = None,
+        next_action: str = "",
+        requires_decision: bool = False,
+    ) -> Event:
+        self.require_permission(from_agent_id, REPORT_TO_HUMAN, task_id=task_id)
+        agent = self.store.get_agent(from_agent_id)
+        if agent is None:
+            raise KeyError(f"agent not found: {from_agent_id}")
+        if agent.manager_id is not None:
+            self.record_event(
+                event_type="permission_violation",
+                actor_id=from_agent_id,
+                task_id=task_id,
+                payload={"capability": REPORT_TO_HUMAN, "required_role": "ceo"},
+            )
+            raise PermissionError("report_to_human is reserved for the CEO or top-level agent")
+        event = self.record_event(
+            event_type="human_report_registered",
+            actor_id=from_agent_id,
+            task_id=task_id,
+            payload={
+                "human_report_id": f"human_report_{uuid4().hex[:12]}",
+                "title": _clip_event_text(title or "CEO report to human"),
+                "message": _clip_event_text(message),
+                "status": _clip_event_text(status),
+                "confidence": confidence,
+                "next_action": _clip_event_text(next_action),
+                "requires_decision": requires_decision,
+            },
+        )
+        if task_id is not None:
+            self._refresh_related_task_trace_exports(task_id)
+        return event
 
     def register_artifact(self, artifact: Artifact) -> None:
         self.require_permission(artifact.agent_id, SUBMIT_ARTIFACT, task_id=artifact.task_id)
@@ -179,6 +397,7 @@ class WorkforceRuntime:
             task_id=artifact.task_id,
             payload={"artifact_id": artifact.artifact_id, "type": artifact.type},
         )
+        self._refresh_related_task_trace_exports(artifact.task_id)
 
     def record_event(
         self,
@@ -238,12 +457,14 @@ class WorkforceRuntime:
         returncode: int,
         timed_out: bool = False,
     ) -> Event:
-        return self.record_event(
+        event = self.record_event(
             event_type="worker_run_finished",
             actor_id=actor_id,
             task_id=task_id,
             payload={"run_id": run_id, "returncode": returncode, "timed_out": timed_out},
         )
+        self._refresh_related_task_trace_exports(task_id)
+        return event
 
     def record_agent_run_started(
         self,
@@ -292,12 +513,52 @@ class WorkforceRuntime:
             payload["usage"] = usage
         if error:
             payload["error"] = _clip_event_text(error)
-        return self.record_event(
+        event = self.record_event(
             event_type="agent_run_finished",
             actor_id=actor_id,
             task_id=task_id,
             payload=payload,
         )
+        if task_id is not None:
+            self._refresh_related_task_trace_exports(task_id)
+        return event
+
+    def export_task_trace(
+        self,
+        task_id: str,
+        *,
+        workspace: str | Path | None = None,
+        trace_id: str | None = None,
+        include_descendants: bool = True,
+        include_file_contents: bool = True,
+        max_file_bytes: int = 500_000,
+        record_event: bool = True,
+    ):
+        from workforce_runtime.server.tracing import export_task_trace as write_task_trace_export
+
+        output_dir = Path(workspace) if workspace is not None else self._default_task_trace_dir()
+        trace = write_task_trace_export(
+            self,
+            task_id=task_id,
+            workspace=output_dir,
+            trace_id=trace_id,
+            include_descendants=include_descendants,
+            include_file_contents=include_file_contents,
+            max_file_bytes=max_file_bytes,
+        )
+        if record_event:
+            self.record_event(
+                event_type="task_trace_exported",
+                actor_id="system",
+                task_id=task_id,
+                payload={
+                    "trace_id": trace.trace_id,
+                    "trace_path": trace.path,
+                    "format": trace.format,
+                    "task_ids": trace.payload.get("scope", {}).get("task_ids", [task_id]),
+                },
+            )
+        return trace
 
     def get_report_recipient(self, agent_id: str) -> str:
         agent = self.store.get_agent(agent_id)
@@ -338,6 +599,60 @@ class WorkforceRuntime:
             current = self.store.get_agent(current.manager_id)
         return False
 
+    def require_task_access(self, actor_id: str, task_id: str) -> None:
+        if actor_id in {"human", "system", "runtime"}:
+            return
+        actor = self.store.get_agent(actor_id)
+        if actor is None:
+            raise KeyError(f"agent not found: {actor_id}")
+        task = self.require_task(task_id)
+        if actor_id in {task.assigned_to, task.assigned_by}:
+            return
+        if task.assigned_to and self.is_manager_of(actor_id, task.assigned_to):
+            return
+        if task.assigned_by and self.is_manager_of(actor_id, task.assigned_by):
+            return
+        if task.parent_task_id:
+            parent = self.store.get_task(task.parent_task_id)
+            if parent and actor_id in {parent.assigned_to, parent.assigned_by}:
+                return
+        self.record_event(
+            event_type="permission_violation",
+            actor_id=actor_id,
+            task_id=task_id,
+            payload={"capability": "task_dossier_access"},
+        )
+        raise PermissionError(f"agent {actor_id} cannot access task dossier: {task_id}")
+
+    def require_tool_request_approver(
+        self,
+        actor_id: str,
+        approval_level: str,
+        *,
+        task_id: str | None = None,
+    ) -> None:
+        if actor_id == "human":
+            return
+        agent = self.store.get_agent(actor_id)
+        if agent is None:
+            raise KeyError(f"agent not found: {actor_id}")
+        role = agent.role.lower()
+        if approval_level == "human_ceo" and (agent.manager_id is None or "ceo" in role):
+            return
+        if approval_level == "vp" and ("vp" in role or agent.manager_id is None or "ceo" in role):
+            return
+        if approval_level == "manager" and task_id is not None:
+            task = self.require_task(task_id)
+            if task.assigned_to and self.is_manager_of(actor_id, task.assigned_to):
+                return
+        self.record_event(
+            event_type="permission_violation",
+            actor_id=actor_id,
+            task_id=task_id,
+            payload={"capability": "approve_tool_request", "approval_level": approval_level},
+        )
+        raise PermissionError(f"agent {actor_id} cannot approve tool requests at level {approval_level}")
+
     def send_discussion_message(
         self,
         *,
@@ -357,6 +672,86 @@ class WorkforceRuntime:
             task_id=task_id,
             payload={"to_agent_id": to_agent_id, "message": message, "thread_id": thread_id},
         )
+
+    def request_tool(
+        self,
+        *,
+        actor_id: str,
+        tool_name: str,
+        problem: str,
+        proposed_capability: str,
+        task_id: str | None = None,
+        frequency: str = "",
+        current_workaround: str = "",
+        requested_approval_level: str = "human_ceo",
+    ) -> dict[str, object]:
+        if task_id is not None:
+            self.require_task_access(actor_id, task_id)
+        elif actor_id not in {"human", "system", "runtime"} and self.store.get_agent(actor_id) is None:
+            raise KeyError(f"agent not found: {actor_id}")
+
+        request_id = f"toolreq_{uuid4().hex[:12]}"
+        payload = {
+            "request_id": request_id,
+            "tool_name": tool_name,
+            "problem": problem,
+            "proposed_capability": proposed_capability,
+            "frequency": frequency,
+            "current_workaround": current_workaround,
+            "requested_approval_level": requested_approval_level,
+            "status": "pending",
+        }
+        self.record_event(event_type="tool_request_submitted", actor_id=actor_id, task_id=task_id, payload=payload)
+        if task_id is not None:
+            self.upsert_task_document(
+                actor_id=actor_id,
+                task_id=task_id,
+                title=f"Tool request: {tool_name}",
+                doc_type="tool_request",
+                content=(
+                    f"Problem: {problem}\n\n"
+                    f"Proposed capability: {proposed_capability}\n\n"
+                    f"Frequency: {frequency or 'not specified'}\n\n"
+                    f"Current workaround: {current_workaround or 'not specified'}"
+                ),
+            )
+        return {"ok": True, "request_id": request_id, "status": "pending", "approval_level": requested_approval_level}
+
+    def decide_tool_request(
+        self,
+        *,
+        actor_id: str,
+        request_id: str,
+        decision: str,
+        notes: str = "",
+        approval_level: str = "",
+    ) -> dict[str, object]:
+        request_event = next(
+            (
+                event
+                for event in self.store.list_events()
+                if event.event_type == "tool_request_submitted" and event.payload.get("request_id") == request_id
+            ),
+            None,
+        )
+        if request_event is None:
+            raise KeyError(f"tool request not found: {request_id}")
+        effective_level = approval_level or str(request_event.payload.get("requested_approval_level") or "human_ceo")
+        self.require_tool_request_approver(actor_id, effective_level, task_id=request_event.task_id)
+        if decision not in {"approved", "rejected"}:
+            raise ValueError("decision must be approved or rejected")
+        self.record_event(
+            event_type=f"tool_request_{decision}",
+            actor_id=actor_id,
+            task_id=request_event.task_id,
+            payload={
+                "request_id": request_id,
+                "decision": decision,
+                "notes": notes,
+                "approval_level": effective_level,
+            },
+        )
+        return {"ok": True, "request_id": request_id, "decision": decision}
 
     def check_progress(
         self,
@@ -417,6 +812,7 @@ class WorkforceRuntime:
         department: str,
         manager_id: str,
         worker_type: str,
+        model: str = "",
         responsibilities: list[str] | None = None,
         permissions: list[str] | None = None,
         budget: Budget | None = None,
@@ -466,6 +862,7 @@ class WorkforceRuntime:
             department=department,
             manager_id=manager_id,
             worker_type=worker_type,
+            model=model,
             responsibilities=responsibilities or [],
             permissions=permissions or [],
             budget=candidate_budget,
@@ -477,6 +874,7 @@ class WorkforceRuntime:
             agent.system_prompt = generate_system_prompt(company, agent)
 
         self.store.save_agent(agent)
+        self._ensure_agent_personal_profile(agent.id, updated_by=requested_by)
         self.record_event(
             event_type="agent_hired",
             actor_id=requested_by,
@@ -503,6 +901,81 @@ class WorkforceRuntime:
             payload={"target_agent_id": target_agent_id},
         )
         return updated
+
+    def get_agent_personal_profile(self, *, actor_id: str, agent_id: str) -> AgentPersonalProfile:
+        self.require_agent_profile_access(actor_id, agent_id)
+        return self._ensure_agent_personal_profile(agent_id, updated_by="runtime")
+
+    def list_visible_agent_personal_profiles(self, *, actor_id: str) -> list[AgentPersonalProfile]:
+        agents = self.store.list_agents()
+        if actor_id in {"human", "system", "runtime"}:
+            visible_ids = {agent.id for agent in agents}
+        else:
+            if self.store.get_agent(actor_id) is None:
+                raise KeyError(f"agent not found: {actor_id}")
+            visible_ids = {agent.id for agent in agents if agent.id == actor_id or self.is_manager_of(actor_id, agent.id)}
+        return [
+            self._ensure_agent_personal_profile(agent_id, updated_by="runtime")
+            for agent_id in sorted(visible_ids)
+        ]
+
+    def update_agent_personal_profile(
+        self,
+        *,
+        actor_id: str,
+        agent_id: str,
+        summary: str | None = None,
+        knows_about: list[str] | None = None,
+        can_do: list[str] | None = None,
+        specialty_tags: list[str] | None = None,
+        preferred_tools: list[str] | None = None,
+        boundaries: list[str] | None = None,
+        experience: AgentExperience | None = None,
+    ) -> AgentPersonalProfile:
+        if actor_id not in {"human", "system", "runtime"} and actor_id != agent_id:
+            self.record_event(
+                event_type="permission_violation",
+                actor_id=actor_id,
+                payload={"capability": "update_agent_profile", "target_agent_id": agent_id},
+            )
+            raise PermissionError("agents can only update their own personal profile")
+        if self.store.get_agent(agent_id) is None:
+            raise KeyError(f"agent not found: {agent_id}")
+        existing = self._ensure_agent_personal_profile(agent_id, updated_by=actor_id)
+        updates: dict[str, object] = {
+            "updated_by": actor_id,
+            "revision": existing.revision + 1,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        if summary is not None:
+            updates["summary"] = _clip_event_text(summary)
+        if knows_about is not None:
+            updates["knows_about"] = _merge_limited(existing.knows_about, knows_about, limit=24)
+        if can_do is not None:
+            updates["can_do"] = _merge_limited(existing.can_do, can_do, limit=24)
+        if specialty_tags is not None:
+            updates["specialty_tags"] = _merge_limited(existing.specialty_tags, specialty_tags, limit=12)
+        if preferred_tools is not None:
+            updates["preferred_tools"] = _merge_limited(existing.preferred_tools, preferred_tools, limit=16)
+        if boundaries is not None:
+            updates["boundaries"] = _merge_limited(existing.boundaries, boundaries, limit=16)
+        if experience is not None:
+            updates["experiences"] = [*existing.experiences, experience][-20:]
+        updates = {key: value for key, value in updates.items() if value is not None}
+        profile = existing.model_copy(update=updates)
+        self.store.save_agent_personal_profile(profile)
+        self.record_event(
+            event_type="agent_profile_updated",
+            actor_id=actor_id,
+            task_id=experience.task_id if experience and experience.task_id else None,
+            payload={
+                "profile_agent_id": agent_id,
+                "revision": profile.revision,
+                "summary": _clip_event_text(profile.summary, limit=300),
+                "specialty_tags": profile.specialty_tags[:8],
+            },
+        )
+        return profile
 
     def record_budget_violation(
         self,
@@ -539,9 +1012,10 @@ class WorkforceRuntime:
         )
         raise PermissionError(f"agent {agent_id} lacks permission: {capability}")
 
-    def _next_task_id(self) -> str:
+    def _next_task_id(self, title: str = "task") -> str:
         existing = self.store.list_tasks()
-        return f"task_{len(existing) + 1:03d}"
+        slug = _slugify(title)
+        return f"task_{len(existing) + 1:03d}_{slug}_{uuid4().hex[:6]}"
 
     def review_report(
         self,
@@ -629,7 +1103,7 @@ class WorkforceRuntime:
 
     def _create_and_run_manager_review(self, task: TaskContract, report: ReportContract) -> TaskContract:
         review_task = TaskContract(
-            task_id=self._next_task_id(),
+            task_id=self._next_task_id(f"Review report {report.report_id}"),
             title=f"Review report {report.report_id} for {task.task_id}",
             objective=f"Review worker output for task {task.task_id}.",
             assigned_to=report.to_agent_id,
@@ -694,6 +1168,8 @@ class WorkforceRuntime:
                 "final_task_status": final_status,
             },
         )
+        self._refresh_related_task_trace_exports(task.task_id)
+        self._refresh_related_task_trace_exports(review_task.task_id)
 
     def _is_review_task(self, task: TaskContract) -> bool:
         return any(ref.startswith("report:") for ref in task.context_refs)
@@ -720,6 +1196,47 @@ class WorkforceRuntime:
             },
         )
 
+    def _default_task_trace_dir(self) -> Path:
+        return self.db_path.parent / "task_traces"
+
+    def _refresh_related_task_trace_exports(self, task_id: str) -> None:
+        for related_task_id in self._related_trace_task_ids(task_id):
+            self._refresh_task_trace_export(related_task_id)
+
+    def _refresh_task_trace_export(self, task_id: str) -> None:
+        try:
+            self.export_task_trace(task_id, workspace=self._default_task_trace_dir(), record_event=True)
+        except Exception as exc:  # noqa: BLE001 - trace export must not break task execution.
+            self.record_event(
+                event_type="task_trace_export_failed",
+                actor_id="system",
+                task_id=task_id,
+                payload={"error": _clip_event_text(str(exc))},
+            )
+
+    def _related_trace_task_ids(self, task_id: str) -> list[str]:
+        related: list[str] = []
+        seen: set[str] = set()
+
+        def add(candidate: str | None) -> None:
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                related.append(candidate)
+
+        task = self.store.get_task(task_id)
+        add(task_id)
+        if task is None:
+            return related
+        add(task.root_goal_id)
+        current = task
+        while current.parent_task_id:
+            add(current.parent_task_id)
+            parent = self.store.get_task(current.parent_task_id)
+            if parent is None:
+                break
+            current = parent
+        return related
+
     def _mark_agent_assigned(self, agent_id: str, task_id: str) -> None:
         agent = self.store.get_agent(agent_id)
         if agent is None:
@@ -744,3 +1261,62 @@ def _clip_event_text(text: str, limit: int = 4000) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 20] + "\n...[truncated]..."
+
+
+def _merge_limited(existing: list[str], incoming: list[str], *, limit: int) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in [*existing, *incoming]:
+        item = _profile_item(value)
+        key = item.lower()
+        if not item or key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged[-limit:]
+
+
+def _profile_item(value: object, *, limit: int = 160) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _profile_tags_from_text(text: str, *, limit: int = 8) -> list[str]:
+    stopwords = {
+        "about",
+        "agent",
+        "and",
+        "are",
+        "can",
+        "for",
+        "from",
+        "into",
+        "manager",
+        "report",
+        "task",
+        "that",
+        "the",
+        "this",
+        "with",
+        "work",
+    }
+    tags: list[str] = []
+    seen: set[str] = set()
+    for raw in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", text.lower()):
+        token = raw.strip("_-")
+        if token in stopwords or token in seen:
+            continue
+        seen.add(token)
+        tags.append(token)
+        if len(tags) >= limit:
+            break
+    return tags
+
+
+def _slugify(value: str, *, limit: int = 42) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    if not slug:
+        return "task"
+    return slug[:limit].strip("_") or "task"

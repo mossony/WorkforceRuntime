@@ -35,6 +35,26 @@ Common optional fields:
 
 Accepted reports trigger manager review in the runtime.
 
+### `report_to_human`
+
+Submits a CEO-level update that should be shown clearly to the human operator. This is not a manager report and does not trigger manager review. By default only the root CEO/top-level agent with `report_to_human` permission can call it.
+
+Required fields:
+
+- `from_agent_id`
+- `message`
+
+Common optional fields:
+
+- `task_id`
+- `title`
+- `status`
+- `confidence`
+- `next_action`
+- `requires_decision`
+
+The web dashboard highlights these as Human Reports near the task execution view.
+
 ### `assign`
 
 Creates a task for an agent under the caller's reporting line, or assigns an existing task when `task_id` is provided.
@@ -150,11 +170,62 @@ Expected arguments:
 
 ### `get_task_context`
 
-Returns the current task contract and related runtime context.
+Returns the current task contract and related runtime context, including reports, artifacts, task documents, and actor model capabilities.
 
 Expected arguments:
 
 - `task_id`
+
+### `get_task_dossier`
+
+Returns the broader task dossier: task contract, requirements, division of work from child tasks, task documents, reports, artifacts, and recent events. Agents should use this before asking for a large prompt dump.
+
+Expected arguments:
+
+- `agent_id` or `actor_id`
+- `task_id`
+- optional `include_events`
+- optional `event_limit`
+
+### `upsert_task_doc`
+
+Creates or updates a task-attached document such as requirements, division of work, context notes, decisions, risks, or tool requests.
+
+Expected arguments:
+
+- `agent_id` or `actor_id`
+- `task_id`
+- `title`
+- `content`
+- optional `doc_id`
+- optional `doc_type`
+
+### `request_tool`
+
+Records a request for a new runtime tool when an agent repeatedly finds a missing capability and the workaround is manual or error-prone. The request is auditable and can be approved by the configured approval level.
+
+Expected arguments:
+
+- `from_agent_id`
+- `tool_name`
+- `problem`
+- `proposed_capability`
+- optional `task_id`
+- optional `frequency`
+- optional `current_workaround`
+- optional `requested_approval_level`: `human_ceo`, `vp`, or `manager`
+
+### `decide_tool_request`
+
+Approves or rejects a tool request. Human can approve any level; CEO can approve `human_ceo`; VP/CEO can approve `vp`; a direct manager can approve `manager`.
+
+Expected arguments:
+
+- `from_agent_id`
+- `request_id`
+- `decision`: `approved` or `rejected`
+- optional `approval_level`
+- optional `notes`
 
 ### `get_org_context`
 

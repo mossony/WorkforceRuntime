@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import re
 from pathlib import Path
 
 from workforce_runtime.server.demo import run_sample_repo_fix_demo, run_simple_status_demo, run_web_research_demo
@@ -27,9 +28,10 @@ def test_sample_repo_fix_demo_runs_no_tools_and_tool_tasks(tmp_path: Path) -> No
     assert "Test log:" in output
     assert "Final status: completed" in output
     assert "Workforce Runtime" in output
-    assert (workspace / "artifacts" / "task_005" / "pytest.log").exists()
-    assert (workspace / "artifacts" / "task_005" / "diff.patch").exists()
-    assert "3 passed" in (workspace / "artifacts" / "task_005" / "pytest.log").read_text()
+    tool_task_id = re.search(r"Tool task: (\S+)", output).group(1)
+    assert (workspace / "artifacts" / tool_task_id / "pytest.log").exists()
+    assert (workspace / "artifacts" / tool_task_id / "diff.patch").exists()
+    assert "3 passed" in (workspace / "artifacts" / tool_task_id / "pytest.log").read_text()
 
 
 def test_sample_repo_fix_demo_cli_end_to_end(tmp_path: Path) -> None:
@@ -76,7 +78,8 @@ def test_simple_status_demo_shows_model_routing_progress_and_replay(tmp_path: Pa
     assert "progress_check_requested" in output
     assert "Agent Trajectories" in output
     assert "Final status: completed" in output
-    assert (workspace / "artifacts" / "task_003" / "launch_note.md").exists()
+    launch_task_id = re.search(r"Worker task: (\S+)", output).group(1)
+    assert (workspace / "artifacts" / launch_task_id / "launch_note.md").exists()
 
 
 def test_simple_status_demo_cli_end_to_end(tmp_path: Path) -> None:
@@ -123,6 +126,7 @@ def test_web_research_demo_runs_with_tool_calls_and_artifact(tmp_path: Path, mon
     assert "Final status: completed" in output
     assert "Agent Runs:" in output
     assert "Live Agent Output:" in output
-    summary = workspace / "artifacts" / "task_004" / "web_research_summary.md"
+    worker_task_id = re.search(r"Worker task: (\S+)", output).group(1)
+    summary = workspace / "artifacts" / worker_task_id / "web_research_summary.md"
     assert summary.exists()
     assert "Example Domain Fixture" in summary.read_text()

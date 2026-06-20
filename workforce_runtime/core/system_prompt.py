@@ -3,7 +3,7 @@ from __future__ import annotations
 from workforce_runtime.config import format_model_context_note
 from workforce_runtime.core.agent_profile import AgentProfile
 from workforce_runtime.core.organization import Company
-from workforce_runtime.core.permissions import HIRE_AGENT
+from workforce_runtime.core.permissions import HIRE_AGENT, REPORT_TO_HUMAN
 
 
 def generate_system_prompt(company: Company, agent: AgentProfile) -> str:
@@ -38,6 +38,12 @@ def generate_system_prompt(company: Company, agent: AgentProfile) -> str:
             "- Use assign() only for agents under your reporting line.",
             "- Use discuss() for peer or cross-functional messages.",
             "- Use report() to send completion status to your direct manager.",
+            _human_report_rule(agent),
+            "- Use get_agent_profiles() before assignment decisions when prior agent experience could affect routing.",
+            "- Use get_task_dossier() to pull requirements, division of work, task documents, reports, and artifacts when you need context.",
+            "- Use upsert_task_doc() to preserve requirements, decisions, notes, risks, or division-of-work updates for future agents.",
+            "- Use update_agent_profile() after meaningful work to keep your reusable personal profile current.",
+            "- Use request_tool() when a repeated missing tool makes work unnecessarily manual or error-prone.",
             "- Do not claim completion without evidence, artifacts, or a clear no-tools report.",
         ]
     )
@@ -64,6 +70,12 @@ def _role_guidance(agent: AgentProfile) -> str:
         "Worker guidance: execute assigned tasks within budget and permissions, ask for help when "
         "blocked, submit artifacts when tools are used, and report to your direct manager."
     )
+
+
+def _human_report_rule(agent: AgentProfile) -> str:
+    if REPORT_TO_HUMAN in agent.permissions:
+        return "- Use report_to_human() for final CEO-level updates that the human operator must see clearly."
+    return "- Do not use report_to_human(); it is reserved for the CEO or explicitly authorized top-level agent."
 
 
 def _bullet_list(items: list[str]) -> str:

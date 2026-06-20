@@ -9,13 +9,22 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
-from workforce_runtime.config import model_capabilities
-from workforce_runtime.core.organization import Company
-from workforce_runtime.dashboard.config import load_dashboard_config, merge_dashboard_config
+from workforce_runtime.config import (
+    dashboard_config_from_runtime,
+    load_runtime_config,
+    merge_runtime_config,
+    model_capabilities,
+    runtime_config_path,
+    save_runtime_config,
+)
+from workforce_runtime.core.organization import Company, Organization
+from workforce_runtime.dashboard.config import merge_dashboard_config
 from workforce_runtime.dashboard.summaries import total_budget_usage, worker_performance
 from workforce_runtime.dashboard.text_dashboard import render_agent_trajectories
+from workforce_runtime.evals import BenchmarkCase, load_benchmark_case, run_benchmark_case
+from workforce_runtime.org_designer import OrgDesigner, OrgDesignRequest
 from workforce_runtime.server.long_rfc_demo import DEFAULT_RFC_URL, run_long_rfc_demo
 from workforce_runtime.server.runtime import WorkforceRuntime
 from workforce_runtime.storage.sqlite_store import SequencedEvent
@@ -23,35 +32,81 @@ from workforce_runtime.storage import SQLiteStore
 
 
 CODEX_ICON_PATH = Path("/Applications/Codex.app/Contents/Resources/icon-codex-light.png")
+DEFAULT_REAL_LLM_BENCHMARK_CASE = Path("examples/benchmarks/web_research_real_llm.json")
 
 
-def build_web_dashboard_state(store: SQLiteStore, config: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_web_dashboard_state(
+    store: SQLiteStore,
+    config: dict[str, Any] | None = None,
+    *,
+    task_id_filter: str | None = None,
+) -> dict[str, Any]:
     config = merge_dashboard_config(config)
     company = store.get_company() or Company(name="Unknown Workforce")
-    agents = store.list_agents()
-    tasks = store.list_tasks()
-    reports = store.list_reports()
-    artifacts = store.list_artifacts()
-    events = store.list_events()
+    all_agents = store.list_agents()
+    all_tasks = store.list_tasks()
+    all_reports = store.list_reports()
+    all_artifacts = store.list_artifacts()
+    all_task_documents = store.list_task_documents()
+    all_events = store.list_events()
+    task_scope = _task_filter_scope(all_tasks, task_id_filter)
+    if task_scope:
+        tasks = [task for task in all_tasks if task.task_id in task_scope]
+        reports = [report for report in all_reports if report.task_id in task_scope]
+        artifacts = [artifact for artifact in all_artifacts if artifact.task_id in task_scope]
+        task_documents = [document for document in all_task_documents if document.task_id in task_scope]
+        events = [event for event in all_events if _event_matches_task_scope(event, task_scope)]
+        agent_ids = _agent_ids_for_task_scope(all_agents, tasks, reports, artifacts, events)
+        agents = [agent for agent in all_agents if agent.id in agent_ids]
+    else:
+        agents = all_agents
+        tasks = all_tasks
+        reports = all_reports
+        artifacts = all_artifacts
+        task_documents = all_task_documents
+        events = all_events
     budget = total_budget_usage(tasks, reports)
+    event_usage = _event_usage(events)
+    tokens_used = budget["tokens_used"] + event_usage["actual_tokens"]
+    token_estimate = event_usage["estimated_tokens"]
+    if tokens_used == 0:
+        tokens_used = token_estimate
 
     recent_events = events[-_config_int(config, "activity", "recent_event_limit", default=300):]
     output = _agent_output(events)
     runs = _agent_runs(events)
     activity = _agent_activity(agents, events, config)
+    all_agent_profiles = store.list_agent_personal_profiles()
+    profile_map = {
+        profile.agent_id: profile.model_dump(mode="json")
+        for profile in all_agent_profiles
+        if not task_scope or profile.agent_id in {agent.id for agent in agents}
+    }
     return {
         "cursor": store.latest_event_sequence(),
         "config": config,
+        "task_filter": {
+            "selected_task_id": task_id_filter or "",
+            "task_ids": sorted(task_scope),
+            "enabled": bool(task_scope),
+        },
         "company": company.model_dump(mode="json"),
-        "agents": [agent.model_dump(mode="json") for agent in agents],
-        "org_chart": _org_chart(agents, activity, config),
+        "agents": [_agent_payload(agent, profile_map) for agent in agents],
+        "agent_profiles": list(profile_map.values()),
+        "org_chart": _org_chart(agents, activity, config, profile_map),
         "agent_activity": activity,
         "agent_summaries": {agent_id: data.get("summary", {}) for agent_id, data in activity.items()},
         "tasks": [task.model_dump(mode="json") for task in tasks],
         "reports": [report.model_dump(mode="json") for report in reports],
         "artifacts": [artifact.model_dump(mode="json") for artifact in artifacts],
+        "task_documents": [document.model_dump(mode="json") for document in task_documents],
         "budget": {
             **budget,
+            "tokens_used": tokens_used,
+            "actual_tokens_used": budget["tokens_used"] + event_usage["actual_tokens"],
+            "estimated_stream_tokens": token_estimate,
+            "runtime_seconds_used": budget["runtime_seconds_used"] + event_usage["runtime_seconds"],
+            "tool_calls_used": budget["tool_calls_used"] + event_usage["tool_calls"],
             "token_budget_limit": company.token_budget or budget["max_tokens"],
             "headcount_limit": company.headcount_limit or None,
         },
@@ -59,10 +114,13 @@ def build_web_dashboard_state(store: SQLiteStore, config: dict[str, Any] | None 
         "worker_runs": runs,
         "agent_output": output[-_config_int(config, "activity", "global_output_limit", default=200):],
         "worker_output": output[-_config_int(config, "activity", "worker_output_limit", default=80):],
+        "human_reports": _human_reports(events),
         "events": [_event_summary(event) for event in recent_events],
+        "trace_files": _trace_files(events),
         "event_replay": _compact_event_replay(recent_events),
         "trajectories": render_agent_trajectories(store),
         "worker_performance": worker_performance(agents, tasks, reports, artifacts),
+        "all_tasks": [task.model_dump(mode="json") for task in all_tasks],
     }
 
 
@@ -79,6 +137,70 @@ def serve_web_dashboard(
     server.serve_forever()
 
 
+def _task_filter_scope(tasks: list[Any], task_id: str | None) -> set[str]:
+    if not task_id:
+        return set()
+    if task_id not in {task.task_id for task in tasks}:
+        return set()
+    scope = {task_id}
+    changed = True
+    while changed:
+        changed = False
+        for task in tasks:
+            if task.task_id in scope:
+                continue
+            if task.parent_task_id in scope or task.root_goal_id == task_id:
+                scope.add(task.task_id)
+                changed = True
+    return scope
+
+
+def _event_matches_task_scope(event: Any, task_scope: set[str]) -> bool:
+    if event.task_id in task_scope:
+        return True
+    for key in ("task_id", "parent_task_id", "root_goal_id", "root_task_id", "final_task_id", "reviewed_task_id"):
+        value = event.payload.get(key)
+        if isinstance(value, str) and value in task_scope:
+            return True
+    for key in ("task_ids", "current_task_ids"):
+        value = event.payload.get(key)
+        if isinstance(value, list) and task_scope.intersection(str(item) for item in value):
+            return True
+    return False
+
+
+def _agent_ids_for_task_scope(
+    agents: list[Any],
+    tasks: list[Any],
+    reports: list[Any],
+    artifacts: list[Any],
+    events: list[Any],
+) -> set[str]:
+    ids: set[str] = set()
+    for task in tasks:
+        for value in (task.assigned_to, task.assigned_by):
+            if value:
+                ids.add(str(value))
+    for report in reports:
+        ids.add(report.from_agent_id)
+        ids.add(report.to_agent_id)
+    for artifact in artifacts:
+        ids.add(artifact.agent_id)
+    for event in events:
+        ids.add(event.actor_id)
+        for key in ("agent_id", "from_agent_id", "to_agent_id", "target_agent_id", "assigned_to", "worker_id"):
+            value = event.payload.get(key)
+            if value:
+                ids.add(str(value))
+    by_id = {agent.id: agent for agent in agents}
+    for agent_id in list(ids):
+        current = by_id.get(agent_id)
+        while current is not None and current.manager_id:
+            ids.add(current.manager_id)
+            current = by_id.get(current.manager_id)
+    return {agent_id for agent_id in ids if agent_id in by_id}
+
+
 def make_web_dashboard_server(
     db_path: str | Path,
     *,
@@ -88,7 +210,9 @@ def make_web_dashboard_server(
     config_path: str | Path | None = None,
 ) -> ThreadingHTTPServer:
     db = Path(db_path)
-    dashboard_config = load_dashboard_config(config_path) if config_path is not None else merge_dashboard_config(config)
+    config_source_path = runtime_config_path(config_path)
+    runtime_config = merge_runtime_config(config) if config is not None else load_runtime_config(config_source_path)
+    dashboard_config = dashboard_config_from_runtime(runtime_config)
     demo_lock = threading.Lock()
     demo_status: dict[str, Any] = {
         "ok": True,
@@ -102,9 +226,37 @@ def make_web_dashboard_server(
         "error": "",
         "result": {},
     }
+    benchmark_lock = threading.Lock()
+    benchmark_status: dict[str, Any] = {
+        "ok": True,
+        "demo": "real-llm-benchmark",
+        "running": False,
+        "status": "idle",
+        "run_id": "",
+        "workspace": "",
+        "started_at": "",
+        "finished_at": "",
+        "error": "",
+        "result": {},
+    }
+    designed_task_lock = threading.Lock()
+    designed_task_status: dict[str, Any] = {
+        "ok": True,
+        "demo": "designed-task",
+        "running": False,
+        "status": "idle",
+        "run_id": "",
+        "workspace": "",
+        "started_at": "",
+        "finished_at": "",
+        "error": "",
+        "result": {},
+        "root_task_id": "",
+    }
 
     def start_long_rfc_demo(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         nonlocal demo_status
+        demo_defaults = runtime_config.get("demos", {}).get("long_rfc", {})
         with demo_lock:
             if demo_status.get("running"):
                 return HTTPStatus.CONFLICT, demo_status
@@ -112,8 +264,8 @@ def make_web_dashboard_server(
             workspace = Path(
                 str(payload.get("workspace") or db.parent / "dashboard_demo_runs" / run_id)
             )
-            url = str(payload.get("url") or DEFAULT_RFC_URL)
-            delay_seconds = float(payload.get("delay_seconds", 0.8))
+            url = str(payload.get("url") or demo_defaults.get("url") or DEFAULT_RFC_URL)
+            delay_seconds = float(payload.get("delay_seconds", demo_defaults.get("delay_seconds", 0.8)))
             demo_status = {
                 "ok": True,
                 "demo": "long-rfc",
@@ -166,6 +318,294 @@ def make_web_dashboard_server(
                         "traceback": traceback.format_exc(),
                     }
 
+    def start_real_llm_benchmark(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        nonlocal benchmark_status
+        benchmark_defaults = runtime_config.get("benchmarks", {})
+        with benchmark_lock:
+            if benchmark_status.get("running"):
+                return HTTPStatus.CONFLICT, benchmark_status
+            run_id = f"real-llm-benchmark-{int(time.time())}"
+            workspace = Path(str(payload.get("workspace") or db.parent / "dashboard_benchmark_runs" / run_id))
+            case_path = Path(str(payload.get("case_path") or benchmark_defaults.get("default_case_path") or DEFAULT_REAL_LLM_BENCHMARK_CASE))
+            judge = str(payload.get("judge") or benchmark_defaults.get("judge") or "heuristic")
+            use_llm = bool(payload.get("use_llm", benchmark_defaults.get("use_llm", True)))
+            reset = bool(payload.get("reset", benchmark_defaults.get("reset", True)))
+            benchmark_status = {
+                "ok": True,
+                "demo": "real-llm-benchmark",
+                "running": True,
+                "status": "running",
+                "run_id": run_id,
+                "workspace": str(workspace),
+                "started_at": _timestamp(),
+                "finished_at": "",
+                "error": "",
+                "result": {},
+                "case_path": str(case_path),
+                "judge": judge,
+                "use_llm": use_llm,
+                "reset": reset,
+            }
+        thread = threading.Thread(
+            target=run_real_llm_benchmark_background,
+            args=(run_id, workspace, case_path, use_llm, judge, reset),
+            daemon=True,
+        )
+        thread.start()
+        return HTTPStatus.ACCEPTED, benchmark_status
+
+    def run_real_llm_benchmark_background(
+        run_id: str,
+        workspace: Path,
+        case_path: Path,
+        use_llm: bool,
+        judge: str,
+        reset: bool,
+    ) -> None:
+        nonlocal benchmark_status
+        try:
+            case = load_benchmark_case(case_path)
+            result = run_benchmark_case(
+                db,
+                workspace=workspace,
+                case=case,
+                use_llm=use_llm,
+                judge=judge if judge in {"none", "heuristic", "llm"} else "heuristic",  # type: ignore[arg-type]
+                reset=reset,
+                llm_json_config=runtime_config.get("benchmarks", {}).get("llm_json"),
+                source_excerpt_chars=int(runtime_config.get("benchmarks", {}).get("source_excerpt_chars", 20000)),
+            )
+            with benchmark_lock:
+                if benchmark_status.get("run_id") == run_id:
+                    benchmark_status = {
+                        **benchmark_status,
+                        "running": False,
+                        "status": "completed",
+                        "finished_at": _timestamp(),
+                        "result": result.model_dump(mode="json"),
+                    }
+        except Exception as exc:  # noqa: BLE001 - dashboard should surface benchmark failures.
+            error = str(exc)
+            with WorkforceRuntime(db) as runtime:
+                runtime.record_event(
+                    event_type="benchmark_run_failed",
+                    actor_id="system",
+                    payload={
+                        "demo": "real-llm-benchmark",
+                        "run_id": run_id,
+                        "error": _single_line(error, 500),
+                    },
+                )
+            with benchmark_lock:
+                if benchmark_status.get("run_id") == run_id:
+                    benchmark_status = {
+                        **benchmark_status,
+                        "running": False,
+                        "status": "failed",
+                        "finished_at": _timestamp(),
+                        "error": error,
+                        "traceback": traceback.format_exc(),
+                    }
+
+    def design_task_config(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        designed_defaults = runtime_config.get("designed_task", {})
+        goal = str(payload.get("goal") or "").strip()
+        if not goal:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "goal is required"}
+        headcount_limit = _payload_int(payload, "headcount_limit", int(designed_defaults.get("headcount_limit") or 6))
+        token_budget = _payload_int(payload, "token_budget", int(designed_defaults.get("token_budget") or 600000))
+        management_model = str(payload.get("management_model") or designed_defaults.get("management_model") or "openai/gpt-oss-120b:free")
+        worker_model = str(payload.get("worker_model") or designed_defaults.get("worker_model") or "poolside/laguna-m.1:free")
+        use_llm = bool(payload.get("use_llm", designed_defaults.get("use_llm", True)))
+        request = OrgDesignRequest(
+            goal=goal,
+            company_name=str(payload.get("company_name") or designed_defaults.get("company_name") or "Designed Task Workforce"),
+            headcount_limit=headcount_limit,
+            token_budget=token_budget,
+            management_model=management_model,
+            worker_model=worker_model,
+        )
+        organization = OrgDesigner().design(request, use_llm=use_llm, allow_fallback=True)
+        title = _single_line(goal, 72) or "Designed Task"
+        case = BenchmarkCase(
+            id=f"designed_task_{int(time.time())}",
+            title=title,
+            goal=goal,
+            constraints=[str(item) for item in payload.get("constraints") or designed_defaults.get("constraints") or ["Preserve the user's stated objective."]],
+            acceptance_criteria=[
+                str(item)
+                for item in payload.get("acceptance_criteria")
+                or designed_defaults.get("acceptance_criteria")
+                or ["Produce a concise result artifact.", "Report evidence, risks, and next action."]
+            ],
+            expected_artifacts=[str(item) for item in payload.get("expected_artifacts") or designed_defaults.get("expected_artifacts") or ["task_result"]],
+            headcount_limit=headcount_limit,
+            token_budget=token_budget,
+            management_model=management_model,
+            worker_model=worker_model,
+            judge_model=str(payload.get("judge_model") or designed_defaults.get("judge_model") or management_model),
+        )
+        config_payload = {
+            "case": case.model_dump(mode="json"),
+            "organization": organization.model_dump(mode="json"),
+            "run": {
+                "use_llm": use_llm,
+                "judge": str(payload.get("judge") or designed_defaults.get("judge") or "heuristic"),
+                "reset": bool(payload.get("reset", designed_defaults.get("reset", False))),
+            },
+        }
+        return HTTPStatus.OK, {"ok": True, "config": config_payload}
+
+    def start_designed_task(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        nonlocal designed_task_status
+        config_payload = payload.get("config")
+        if not isinstance(config_payload, dict):
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "config object is required"}
+        try:
+            case = BenchmarkCase.model_validate(config_payload.get("case"))
+            organization = Organization.model_validate(config_payload.get("organization"))
+        except Exception as exc:  # noqa: BLE001 - API should return validation errors.
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": f"invalid config: {exc}"}
+        run_config = config_payload.get("run") if isinstance(config_payload.get("run"), dict) else {}
+        with designed_task_lock:
+            if designed_task_status.get("running"):
+                return HTTPStatus.CONFLICT, designed_task_status
+            run_id = f"designed-task-{int(time.time())}"
+            workspace = Path(str(payload.get("workspace") or db.parent / "dashboard_task_runs" / run_id))
+            designed_task_status = {
+                "ok": True,
+                "demo": "designed-task",
+                "running": True,
+                "status": "running",
+                "run_id": run_id,
+                "workspace": str(workspace),
+                "started_at": _timestamp(),
+                "finished_at": "",
+                "error": "",
+                "result": {},
+                "root_task_id": "",
+                "case_id": case.id,
+            }
+        thread = threading.Thread(
+            target=run_designed_task_background,
+            args=(
+                run_id,
+                workspace,
+                case,
+                organization,
+                bool(run_config.get("use_llm", True)),
+                str(run_config.get("judge") or "heuristic"),
+                bool(run_config.get("reset", False)),
+            ),
+            daemon=True,
+        )
+        thread.start()
+        return HTTPStatus.ACCEPTED, designed_task_status
+
+    def update_runtime_config(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        nonlocal runtime_config, dashboard_config
+        raw_config = payload.get("config", payload)
+        if not isinstance(raw_config, dict):
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "config object is required"}
+        try:
+            next_config = merge_runtime_config(raw_config)
+            path = save_runtime_config(next_config, config_source_path)
+        except Exception as exc:  # noqa: BLE001 - return validation/write errors to the dashboard.
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+        runtime_config = next_config
+        dashboard_config = dashboard_config_from_runtime(runtime_config)
+        with WorkforceRuntime(db) as runtime:
+            runtime.record_event(
+                event_type="runtime_config_updated",
+                actor_id="system",
+                payload={"path": str(path)},
+            )
+        return HTTPStatus.OK, {"ok": True, "path": str(path), "config": runtime_config}
+
+    def export_task_trace_from_dashboard(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        task_id = str(payload.get("task_id") or "").strip()
+        if not task_id:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "task_id is required"}
+        runtime_defaults = runtime_config.get("runtime", {})
+        workspace = payload.get("workspace") or runtime_defaults.get("task_trace_dir") or None
+        include_file_contents = bool(
+            payload.get("include_file_contents", runtime_defaults.get("task_trace_include_file_contents", True))
+        )
+        max_file_bytes = _payload_int(
+            payload,
+            "max_file_bytes",
+            int(runtime_defaults.get("task_trace_max_file_bytes") or 500000),
+        )
+        try:
+            with WorkforceRuntime(db) as runtime:
+                trace = runtime.export_task_trace(
+                    task_id,
+                    workspace=workspace,
+                    trace_id=str(payload.get("trace_id") or "") or None,
+                    include_descendants=bool(payload.get("include_descendants", True)),
+                    include_file_contents=include_file_contents,
+                    max_file_bytes=max_file_bytes,
+                )
+        except Exception as exc:  # noqa: BLE001 - API should return task/trace errors.
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+        return HTTPStatus.OK, {
+            "ok": True,
+            "trace": trace.model_dump(mode="json"),
+            "path": trace.path,
+            "url": f"/api/file?path={quote(trace.path)}",
+        }
+
+    def run_designed_task_background(
+        run_id: str,
+        workspace: Path,
+        case: BenchmarkCase,
+        organization: Organization,
+        use_llm: bool,
+        judge: str,
+        reset: bool,
+    ) -> None:
+        nonlocal designed_task_status
+        try:
+            result = run_benchmark_case(
+                db,
+                workspace=workspace,
+                case=case,
+                use_llm=use_llm,
+                judge=judge if judge in {"none", "heuristic", "llm"} else "heuristic",  # type: ignore[arg-type]
+                reset=reset,
+                organization_override=organization,
+                llm_json_config=runtime_config.get("benchmarks", {}).get("llm_json"),
+                source_excerpt_chars=int(runtime_config.get("benchmarks", {}).get("source_excerpt_chars", 20000)),
+            )
+            with designed_task_lock:
+                if designed_task_status.get("run_id") == run_id:
+                    designed_task_status = {
+                        **designed_task_status,
+                        "running": False,
+                        "status": "completed",
+                        "finished_at": _timestamp(),
+                        "root_task_id": result.root_task_id,
+                        "result": result.model_dump(mode="json"),
+                    }
+        except Exception as exc:  # noqa: BLE001 - dashboard should surface task failures.
+            error = str(exc)
+            with WorkforceRuntime(db) as runtime:
+                runtime.record_event(
+                    event_type="designed_task_run_failed",
+                    actor_id="system",
+                    payload={"run_id": run_id, "case_id": case.id, "error": _single_line(error, 500)},
+                )
+            with designed_task_lock:
+                if designed_task_status.get("run_id") == run_id:
+                    designed_task_status = {
+                        **designed_task_status,
+                        "running": False,
+                        "status": "failed",
+                        "finished_at": _timestamp(),
+                        "error": error,
+                        "traceback": traceback.format_exc(),
+                    }
+
     class DashboardHandler(BaseHTTPRequestHandler):
         def handle(self) -> None:
             try:
@@ -182,16 +622,29 @@ def make_web_dashboard_server(
                 self._send_file(CODEX_ICON_PATH, content_type="image/png")
                 return
             if parsed.path == "/api/state":
+                query = parse_qs(parsed.query)
+                task_id = str(query.get("task_id", [""])[0] or "")
                 with WorkforceRuntime(db) as runtime:
-                    state = build_web_dashboard_state(runtime.store, dashboard_config)
+                    state = build_web_dashboard_state(runtime.store, dashboard_config, task_id_filter=task_id or None)
                 self._send_json(state)
                 return
             if parsed.path == "/api/config":
                 self._send_json(dashboard_config)
                 return
+            if parsed.path == "/api/runtime-config":
+                self._send_json({"ok": True, "path": str(config_source_path), "config": runtime_config})
+                return
             if parsed.path == "/api/demos/long-rfc/status":
                 with demo_lock:
                     self._send_json(dict(demo_status))
+                return
+            if parsed.path == "/api/demos/real-llm-benchmark/status":
+                with benchmark_lock:
+                    self._send_json(dict(benchmark_status))
+                return
+            if parsed.path == "/api/designed-task/status":
+                with designed_task_lock:
+                    self._send_json(dict(designed_task_status))
                 return
             if parsed.path == "/api/events":
                 query = parse_qs(parsed.query)
@@ -207,6 +660,17 @@ def make_web_dashboard_server(
                 query = parse_qs(parsed.query)
                 after = int(query.get("after", ["0"])[0])
                 self._send_event_stream(db, after=after)
+                return
+            if parsed.path == "/api/file":
+                query = parse_qs(parsed.query)
+                raw_path = query.get("path", [""])[0]
+                with WorkforceRuntime(db) as runtime:
+                    allowed = _known_file_paths(runtime.store)
+                path = Path(raw_path)
+                if str(path) not in allowed:
+                    self.send_error(HTTPStatus.FORBIDDEN, "file is not a recorded runtime file")
+                    return
+                self._send_file(path, content_type="text/plain; charset=utf-8")
                 return
             if parsed.path == "/api/replay":
                 with WorkforceRuntime(db) as runtime:
@@ -228,6 +692,26 @@ def make_web_dashboard_server(
             parsed = urlparse(self.path)
             if parsed.path == "/api/demos/long-rfc/start":
                 status, payload = start_long_rfc_demo(self._read_json_body())
+                self._send_json(payload, status=status)
+                return
+            if parsed.path == "/api/demos/real-llm-benchmark/start":
+                status, payload = start_real_llm_benchmark(self._read_json_body())
+                self._send_json(payload, status=status)
+                return
+            if parsed.path == "/api/designed-task/design":
+                status, payload = design_task_config(self._read_json_body())
+                self._send_json(payload, status=status)
+                return
+            if parsed.path == "/api/designed-task/start":
+                status, payload = start_designed_task(self._read_json_body())
+                self._send_json(payload, status=status)
+                return
+            if parsed.path == "/api/runtime-config":
+                status, payload = update_runtime_config(self._read_json_body())
+                self._send_json(payload, status=status)
+                return
+            if parsed.path == "/api/tasks/export-trace":
+                status, payload = export_task_trace_from_dashboard(self._read_json_body())
                 self._send_json(payload, status=status)
                 return
             self.send_error(HTTPStatus.NOT_FOUND, "not found")
@@ -319,9 +803,9 @@ def make_web_dashboard_server(
 
 
 def add_web_dashboard_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--config", type=Path, default=None, help="Path to dashboard JSON config")
+    parser.add_argument("--host", default=None)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--config", dest="dashboard_config_path", type=Path, default=None, help="Path to Workforce Runtime JSON config")
 
 
 def _agent_runs(events: list[Any]) -> list[dict[str, Any]]:
@@ -332,12 +816,15 @@ def _agent_runs(events: list[Any]) -> list[dict[str, Any]]:
             "worker_run_finished",
             "agent_run_started",
             "agent_run_finished",
+            "agent_run_path_registered",
         }:
             continue
         run_id = str(event.payload.get("run_id") or "")
         if not run_id:
             continue
         kind = "worker" if event.event_type.startswith("worker_") else "agent"
+        if event.event_type == "agent_run_path_registered" and run_id in runs:
+            kind = str(runs[run_id].get("kind") or "worker")
         run = runs.setdefault(
             run_id,
             {
@@ -352,6 +839,14 @@ def _agent_runs(events: list[Any]) -> list[dict[str, Any]]:
                 "returncode": None,
                 "timed_out": False,
                 "error": "",
+                "run_dir": "",
+                "stdout_path": "",
+                "stderr_path": "",
+                "prompt_path": "",
+                "response_path": "",
+                "raw_response_path": "",
+                "error_path": "",
+                "last_attempt_error_path": "",
             },
         )
         run["task_id"] = event.task_id or run["task_id"]
@@ -366,10 +861,68 @@ def _agent_runs(events: list[Any]) -> list[dict[str, Any]]:
             run["returncode"] = event.payload.get("returncode")
             run["timed_out"] = bool(event.payload.get("timed_out"))
             run["status"] = "timed_out" if run["timed_out"] else "finished"
+        elif event.event_type == "agent_run_path_registered":
+            run["run_dir"] = str(event.payload.get("run_dir") or "")
+            run["stdout_path"] = str(event.payload.get("stdout_path") or "")
+            run["stderr_path"] = str(event.payload.get("stderr_path") or "")
+            run["prompt_path"] = str(event.payload.get("prompt_path") or "")
+            run["response_path"] = str(event.payload.get("response_path") or "")
+            run["raw_response_path"] = str(event.payload.get("raw_response_path") or "")
+            run["error_path"] = str(event.payload.get("error_path") or "")
+            run["last_attempt_error_path"] = str(event.payload.get("last_attempt_error_path") or "")
         else:
             run["status"] = str(event.payload.get("status") or "finished")
             run["error"] = str(event.payload.get("error") or "")
     return list(runs.values())
+
+
+def _event_usage(events: list[Any]) -> dict[str, int]:
+    actual_tokens = 0
+    runtime_seconds = 0
+    tool_calls = 0
+    output_text = ""
+    for event in events:
+        if event.event_type in {"agent_run_finished", "worker_run_finished"}:
+            usage = event.payload.get("usage")
+            if isinstance(usage, dict):
+                actual_tokens += _usage_tokens(usage)
+                runtime_seconds += _int_value(usage.get("runtime_seconds"))
+                tool_calls += _int_value(usage.get("tool_calls"))
+        if event.event_type in {"agent_output", "worker_output"}:
+            output_text += " " + str(event.payload.get("text") or "")
+    return {
+        "actual_tokens": actual_tokens,
+        "runtime_seconds": runtime_seconds,
+        "tool_calls": tool_calls,
+        "estimated_tokens": _estimate_tokens(output_text),
+    }
+
+
+def _usage_tokens(usage: dict[str, Any]) -> int:
+    for key in ("total_tokens", "tokens_used"):
+        value = _int_value(usage.get(key))
+        if value:
+            return value
+    return (
+        _int_value(usage.get("input_tokens"))
+        + _int_value(usage.get("output_tokens"))
+        + _int_value(usage.get("reasoning_output_tokens"))
+        + _int_value(usage.get("prompt_tokens"))
+        + _int_value(usage.get("completion_tokens"))
+    )
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _estimate_tokens(text: str) -> int:
+    if not text.strip():
+        return 0
+    return max(1, len(text) // 4)
 
 
 def _agent_output(events: list[Any]) -> list[dict[str, Any]]:
@@ -381,6 +934,81 @@ def _agent_output(events: list[Any]) -> list[dict[str, Any]]:
     return output
 
 
+def _trace_files(events: list[Any]) -> list[dict[str, Any]]:
+    traces: list[dict[str, Any]] = []
+    for event in events:
+        if event.event_type not in {"trace_file_written", "task_trace_exported"}:
+            continue
+        path = str(event.payload.get("trace_path") or "")
+        if not path:
+            continue
+        traces.append(
+            {
+                "path": path,
+                "run_id": event.payload.get("run_id") or "",
+                "trace_id": event.payload.get("trace_id") or "",
+                "task_id": event.task_id
+                or event.payload.get("task_id")
+                or event.payload.get("final_task_id")
+                or "",
+                "label": event.payload.get("label") or ("task" if event.event_type == "task_trace_exported" else ""),
+                "timestamp": event.timestamp.isoformat(),
+            }
+        )
+    return traces
+
+
+def _human_reports(events: list[Any]) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    for event in events:
+        if event.event_type != "human_report_registered":
+            continue
+        payload = event.payload
+        reports.append(
+            {
+                "event_id": event.event_id,
+                "timestamp": event.timestamp.isoformat(),
+                "from_agent_id": event.actor_id,
+                "task_id": event.task_id or "",
+                "human_report_id": payload.get("human_report_id") or "",
+                "title": payload.get("title") or "CEO report to human",
+                "message": payload.get("message") or "",
+                "status": payload.get("status") or "",
+                "confidence": payload.get("confidence"),
+                "next_action": payload.get("next_action") or "",
+                "requires_decision": bool(payload.get("requires_decision", False)),
+            }
+        )
+    return reports
+
+
+def _known_file_paths(store: SQLiteStore) -> set[str]:
+    paths: set[str] = set()
+    for artifact in store.list_artifacts():
+        paths.add(str(Path(artifact.path)))
+    for event in store.list_events():
+        for key in (
+            "trace_path",
+            "stdout_path",
+            "stderr_path",
+            "prompt_path",
+            "response_path",
+            "raw_response_path",
+            "error_path",
+            "last_attempt_error_path",
+        ):
+            value = event.payload.get(key)
+            if value:
+                paths.add(str(Path(str(value))))
+        if event.event_type == "agent_run_path_registered" and event.payload.get("run_dir"):
+            run_dir = Path(str(event.payload["run_dir"]))
+            if run_dir.exists():
+                for path in run_dir.iterdir():
+                    if path.is_file():
+                        paths.add(str(path))
+    return paths
+
+
 def _agent_activity(agents: list[Any], events: list[Any], config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     output_limit = _config_int(config, "activity", "recent_output_items", default=12)
     tool_limit = _config_int(config, "activity", "recent_tool_items", default=12)
@@ -388,7 +1016,7 @@ def _agent_activity(agents: list[Any], events: list[Any], config: dict[str, Any]
     full_stream_limit = _config_int(config, "activity", "full_stream_limit", default=200)
     event_scan_limit = _config_int(config, "activity", "event_scan_limit", default=1200)
     activity: dict[str, dict[str, Any]] = {
-        agent.id: {"output": [], "full_output": [], "tools": [], "events": []}
+        agent.id: {"output": [], "full_output": [], "errors": [], "tools": [], "events": []}
         for agent in agents
     }
     for event in events[-event_scan_limit:]:
@@ -397,12 +1025,16 @@ def _agent_activity(agents: list[Any], events: list[Any], config: dict[str, Any]
         agent_activity = activity[event.actor_id]
         if event.event_type in {"worker_output", "agent_output"}:
             item = _agent_output_item(event)
-            agent_activity["output"].append(item)
-            agent_activity["output"] = _tail(agent_activity["output"], output_limit)
+            if item.get("stream") == "error":
+                agent_activity["errors"].append(item)
+                agent_activity["errors"] = _tail(agent_activity["errors"], output_limit)
+            else:
+                agent_activity["output"].append(item)
+                agent_activity["output"] = _tail(agent_activity["output"], output_limit)
             agent_activity["full_output"].append(item)
             agent_activity["full_output"] = _tail(agent_activity["full_output"], full_stream_limit)
             continue
-        if event.event_type.startswith("mcp_tool_call_"):
+        if _is_tool_call_event(event.event_type):
             agent_activity["tools"].append(_tool_event_item(event))
             agent_activity["tools"] = _tail(agent_activity["tools"], tool_limit)
             continue
@@ -412,11 +1044,23 @@ def _agent_activity(agents: list[Any], events: list[Any], config: dict[str, Any]
             "task_status_updated",
             "discussion_message",
             "report_registered",
+            "human_report_registered",
             "manager_review_created",
             "manager_review_decided",
             "progress_checked",
             "agent_hired",
+            "agent_profile_updated",
             "system_prompt_updated",
+            "task_document_upserted",
+            "tool_request_submitted",
+            "tool_request_approved",
+            "tool_request_rejected",
+            "agent_run_path_registered",
+            "agent_run_attempt_started",
+            "agent_run_attempt_failed",
+            "agent_run_retrying",
+            "trace_file_written",
+            "runtime_config_updated",
         }:
             agent_activity["events"].append(_activity_event_item(event))
             agent_activity["events"] = _tail(agent_activity["events"], event_limit)
@@ -426,7 +1070,18 @@ def _agent_activity(agents: list[Any], events: list[Any], config: dict[str, Any]
     return activity
 
 
-def _org_chart(agents: list[Any], activity: dict[str, dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+def _agent_payload(agent: Any, profile_map: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    payload = agent.model_dump(mode="json")
+    payload["personal_profile"] = profile_map.get(agent.id, {})
+    return payload
+
+
+def _org_chart(
+    agents: list[Any],
+    activity: dict[str, dict[str, Any]],
+    config: dict[str, Any],
+    profile_map: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
     by_manager: dict[str | None, list[Any]] = {}
     for agent in agents:
         by_manager.setdefault(agent.manager_id, []).append(agent)
@@ -441,11 +1096,13 @@ def _org_chart(agents: list[Any], activity: dict[str, dict[str, Any]], config: d
             "department": agent.department,
             "status": agent.status,
             "model": agent.model,
-            "model_capabilities": model_capabilities(agent.model) or {},
+            "system_prompt": agent.system_prompt,
+            "model_capabilities": model_capabilities(agent.model, {"models": config.get("models", {})}) or {},
             "worker_type": agent.worker_type,
+            "personal_profile": profile_map.get(agent.id, {}),
             "icon": _agent_icon(agent, config),
             "current_task_ids": list(agent.current_task_ids),
-            "activity": activity.get(agent.id, {"output": [], "full_output": [], "tools": [], "events": []}),
+            "activity": activity.get(agent.id, {"output": [], "full_output": [], "errors": [], "tools": [], "events": []}),
             "summary": activity.get(agent.id, {}).get("summary", {}),
             "child_count": len(children),
             "descendant_count": descendant_count,
@@ -462,11 +1119,12 @@ def _agent_activity_summary(agent: Any, activity: dict[str, Any], config: dict[s
         text = _single_line(str(output.get("text") or ""), max_chars)
         if text:
             stream = output.get("stream") or "output"
+            label = "Error" if stream == "error" else str(stream)
             items.append(
                 {
                     "timestamp": str(output.get("timestamp") or ""),
                     "event_type": str(output.get("event_type") or "output"),
-                    "text": f"{stream}: {text}",
+                    "text": f"{label}: {text}",
                     "task_id": str(output.get("task_id") or ""),
                 }
             )
@@ -598,6 +1256,9 @@ def _agent_output_item(event: Any) -> dict[str, Any]:
 
 def _tool_event_item(event: Any) -> dict[str, Any]:
     payload = event.payload
+    status = event.event_type.removeprefix("mcp_tool_call_")
+    if status == event.event_type:
+        status = event.event_type.removeprefix("tool_call_")
     return {
         "event_id": event.event_id,
         "timestamp": event.timestamp.isoformat(),
@@ -605,12 +1266,12 @@ def _tool_event_item(event: Any) -> dict[str, Any]:
         "task_id": event.task_id,
         "agent_id": event.actor_id,
         "tool_name": payload.get("tool_name"),
-        "status": event.event_type.removeprefix("mcp_tool_call_"),
+        "status": status,
         "target_agent_id": payload.get("target_agent_id")
         or payload.get("to_agent_id")
         or payload.get("assigned_to")
         or payload.get("worker_id"),
-        "message": payload.get("message") or payload.get("title") or payload.get("error") or "",
+        "message": payload.get("message") or payload.get("title") or payload.get("error") or payload.get("url") or "",
         "result_id": payload.get("task_id") or payload.get("report_id") or payload.get("event_id") or "",
     }
 
@@ -664,6 +1325,7 @@ def _compact_event_detail(event: Any) -> str:
     payload = event.payload
     keys = [
         "tool_name",
+        "requested_tool_name",
         "assigned_to",
         "to_agent_id",
         "target_agent_id",
@@ -672,8 +1334,29 @@ def _compact_event_detail(event: Any) -> str:
         "returncode",
         "timed_out",
         "report_id",
+        "human_report_id",
         "decision",
         "message",
+        "title",
+        "url",
+        "doc_id",
+        "doc_type",
+        "request_id",
+        "approval_level",
+        "problem",
+        "trace_path",
+        "run_dir",
+        "stdout_path",
+        "stderr_path",
+        "prompt_path",
+        "response_path",
+        "raw_response_path",
+        "error_path",
+        "last_attempt_error_path",
+        "attempt",
+        "max_attempts",
+        "next_attempt",
+        "delay_seconds",
     ]
     parts: list[str] = []
     for key in keys:
@@ -688,6 +1371,10 @@ def _compact_event_detail(event: Any) -> str:
     return " ".join(parts)
 
 
+def _is_tool_call_event(event_type: str) -> bool:
+    return event_type.startswith("mcp_tool_call_") or event_type.startswith("tool_call_")
+
+
 def _single_line(text: str, limit: int) -> str:
     compact = " ".join(text.split())
     if len(compact) <= limit:
@@ -697,6 +1384,13 @@ def _single_line(text: str, limit: int) -> str:
 
 def _timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def _payload_int(payload: dict[str, Any], key: str, default: int) -> int:
+    try:
+        return int(payload.get(key, default))
+    except (TypeError, ValueError):
+        return default
 
 
 HTML = r"""<!doctype html>
@@ -791,6 +1485,274 @@ HTML = r"""<!doctype html>
       gap: 8px;
       flex-wrap: wrap;
     }
+    .task-designer {
+      display: grid;
+      gap: 10px;
+    }
+    .operation-progress {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+      padding: 10px;
+      display: grid;
+      gap: 9px;
+    }
+    .operation-progress.active {
+      border-color: #94d2c9;
+      background: #fcfffe;
+    }
+    .operation-progress-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .operation-progress-title {
+      font-weight: 700;
+    }
+    .operation-progress-detail {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 2px;
+    }
+    .progress-track {
+      height: 7px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e2e8f0;
+    }
+    .progress-fill {
+      width: 32%;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--accent);
+      transform: translateX(-105%);
+    }
+    .operation-progress.active .progress-fill {
+      animation: progress-slide 1.25s ease-in-out infinite;
+    }
+    .operation-progress.finished .progress-fill {
+      width: 100%;
+      transform: translateX(0);
+      animation: none;
+      background: var(--good);
+    }
+    .operation-progress.failed .progress-fill {
+      width: 100%;
+      transform: translateX(0);
+      animation: none;
+      background: var(--bad);
+    }
+    .progress-steps {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .progress-step {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 7px;
+      background: #ffffff;
+    }
+    .progress-step.active {
+      color: var(--accent);
+      border-color: #94d2c9;
+      background: var(--accent-weak);
+      font-weight: 700;
+    }
+    @keyframes progress-slide {
+      0% { transform: translateX(-105%); }
+      55% { transform: translateX(120%); }
+      100% { transform: translateX(120%); }
+    }
+    .form-row {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      align-items: end;
+    }
+    label {
+      display: grid;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 7px 9px;
+      color: var(--text);
+      background: #fff;
+      font: inherit;
+    }
+    textarea {
+      min-height: 86px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+    }
+    .config-editor {
+      min-height: 260px;
+    }
+    .draft-org-panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+      padding: 10px;
+      display: grid;
+      gap: 10px;
+    }
+    .draft-org-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .draft-org-title {
+      font-weight: 700;
+    }
+    .draft-tree, .draft-children {
+      list-style: none;
+      padding-left: 0;
+      margin: 0;
+    }
+    .draft-children {
+      margin-left: 26px;
+      padding-left: 18px;
+      border-left: 2px solid var(--line);
+    }
+    .draft-node {
+      position: relative;
+      margin: 10px 0;
+    }
+    .draft-children > .draft-node::before {
+      content: "";
+      position: absolute;
+      left: -18px;
+      top: 20px;
+      width: 16px;
+      border-top: 2px solid var(--line);
+    }
+    .draft-card {
+      display: grid;
+      gap: 5px;
+      max-width: 560px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 9px 10px;
+    }
+    .draft-card.executive {
+      border-color: #86bdb7;
+      background: #f3fbfa;
+    }
+    .draft-card.manager {
+      border-color: #9bb9ea;
+      background: #f5f8fe;
+    }
+    .draft-card.worker {
+      border-color: #c4b5fd;
+      background: #faf7ff;
+    }
+    .draft-card.hr {
+      border-color: #f0c27b;
+      background: #fff9ed;
+    }
+    .draft-card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .draft-agent-name {
+      font-weight: 700;
+      color: var(--text);
+    }
+    .draft-agent-role, .draft-agent-meta, .draft-agent-responsibilities {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .draft-badge {
+      flex: 0 0 auto;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 1px 7px;
+      font-size: 11px;
+      color: var(--muted);
+      background: #f8fafc;
+    }
+    .human-reports {
+      display: grid;
+      gap: 10px;
+    }
+    .human-report-card {
+      border: 1px solid #86bdb7;
+      border-radius: 8px;
+      background: #f3fbfa;
+      padding: 11px 12px;
+      display: grid;
+      gap: 8px;
+    }
+    .human-report-card.requires-decision {
+      border-color: #f0c27b;
+      background: #fff9ed;
+    }
+    .human-report-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .human-report-title {
+      font-weight: 800;
+    }
+    .human-report-meta, .human-report-next {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .human-report-message {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--text);
+    }
+    .manager-reports {
+      display: grid;
+      gap: 10px;
+    }
+    .manager-report-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+      padding: 11px 12px;
+      display: grid;
+      gap: 8px;
+    }
+    .manager-report-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .manager-report-title {
+      font-weight: 800;
+    }
+    .manager-report-meta, .manager-report-next, .manager-report-evidence {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .manager-report-summary {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--text);
+    }
     .primary-button {
       background: var(--accent);
       color: #ffffff;
@@ -832,6 +1794,20 @@ HTML = r"""<!doctype html>
       white-space: pre-wrap;
       word-break: break-word;
     }
+    .output-block {
+      border-bottom: 1px solid var(--line);
+      padding: 8px 0;
+      display: grid;
+      gap: 6px;
+    }
+    .output-text {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #263447;
+    }
     .pill {
       display: inline-block;
       border: 1px solid var(--line);
@@ -839,6 +1815,33 @@ HTML = r"""<!doctype html>
       padding: 2px 7px;
       color: var(--muted);
       font-size: 12px;
+    }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .mode-toggle {
+      display: inline-flex;
+      gap: 3px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 3px;
+      background: #ffffff;
+    }
+    .mode-toggle button {
+      border: 0;
+      border-radius: 6px;
+      padding: 5px 10px;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .mode-toggle button.active {
+      background: #12312f;
+      color: #ffffff;
     }
     .org-toolbar {
       display: flex;
@@ -874,6 +1877,83 @@ HTML = r"""<!doctype html>
       gap: 8px;
     }
     .agent-node.active { border-color: #94d2c9; background: #fcfffe; }
+    .simple-agent-node {
+      border-color: #d8e1ea;
+      background: #ffffff;
+      box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03);
+    }
+    .simple-agent-node.active {
+      border-color: #66b7ad;
+      background: #f4fbfa;
+    }
+    .simple-agent-main {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+    }
+    .simple-agent-role {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 2px;
+    }
+    .simple-agent-work {
+      color: #334155;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .simple-agent-summary {
+      border: 1px solid #d8e6e3;
+      border-radius: 8px;
+      background: #f8fbfb;
+      padding: 8px 9px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+    }
+    .simple-agent-summary .summary-text {
+      white-space: normal;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+    }
+    .communication-pulses {
+      min-height: 34px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin: 0 0 10px;
+    }
+    .communication-pulse {
+      border: 1px solid #84b9b3;
+      border-radius: 8px;
+      background: #f1fbfa;
+      color: #12312f;
+      padding: 7px 9px;
+      font-size: 12px;
+      box-shadow: 0 4px 12px rgba(17, 94, 89, 0.12);
+      animation: pulse-fade 4.5s ease forwards;
+    }
+    .communication-pulse.report {
+      border-color: #9fbce4;
+      background: #f4f8ff;
+      color: #1e3a5f;
+    }
+    .communication-pulse.human {
+      border-color: #deb36b;
+      background: #fff9ed;
+      color: #6d4a11;
+    }
+    @keyframes pulse-fade {
+      0% { transform: translateY(6px); opacity: 0; }
+      12% { transform: translateY(0); opacity: 1; }
+      82% { transform: translateY(0); opacity: 1; }
+      100% { transform: translateY(-4px); opacity: 0; }
+    }
+    body.mode-simple .debug-only { display: none; }
+    body.mode-debug .simple-only { display: none; }
     .agent-node-head {
       display: flex;
       justify-content: space-between;
@@ -954,7 +2034,7 @@ HTML = r"""<!doctype html>
     }
     .activity-grid {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 8px;
     }
     .activity-block {
@@ -976,6 +2056,14 @@ HTML = r"""<!doctype html>
       overflow-wrap: anywhere;
       border-bottom: 1px solid #edf0f4;
       padding: 3px 0;
+    }
+    .activity-error {
+      color: #9f1239;
+      background: #fff1f2;
+      border: 1px solid #fecdd3;
+      border-radius: 6px;
+      padding: 4px 6px;
+      margin-bottom: 4px;
     }
     .detail-backdrop {
       position: fixed;
@@ -1034,8 +2122,12 @@ HTML = r"""<!doctype html>
     }
     @media (max-width: 900px) {
       .span-3, .span-4, .span-6, .span-8 { grid-column: span 12; }
+      .form-row { grid-template-columns: 1fr; }
       .activity-grid { grid-template-columns: 1fr; }
       header { align-items: flex-start; flex-direction: column; gap: 4px; }
+      .header-actions { justify-content: flex-start; }
+      .simple-agent-main { flex-direction: column; }
+      .simple-agent-work { white-space: normal; }
       .agent-node-head { flex-direction: column; }
       .agent-controls { width: 100%; justify-content: space-between; }
     }
@@ -1047,11 +2139,97 @@ HTML = r"""<!doctype html>
       <h1>Workforce Runtime</h1>
       <div class="muted" id="mission"></div>
     </div>
-    <div class="muted">Stream <span id="stream-status">connecting</span> - State <span id="updated">loading</span></div>
+    <div class="header-actions">
+      <div class="mode-toggle" aria-label="Dashboard mode">
+        <button data-action="set-dashboard-mode" data-mode="simple" id="mode-simple">Simple</button>
+        <button data-action="set-dashboard-mode" data-mode="debug" id="mode-debug">Debug</button>
+      </div>
+      <div class="muted">Stream <span id="stream-status">connecting</span> - State <span id="updated">loading</span></div>
+    </div>
   </header>
   <main>
     <section class="grid" id="metrics"></section>
     <section class="grid">
+      <div class="panel span-12">
+        <div class="task-designer">
+          <div class="demo-panel">
+            <div class="demo-copy">
+              <div class="demo-title">Designed Task Run</div>
+              <div class="muted">Enter a goal, generate an organization/config draft, edit the JSON, then start execution.</div>
+            </div>
+            <div class="demo-actions">
+              <span class="pill" id="designed-task-status">idle</span>
+            </div>
+          </div>
+          <label>Task goal
+            <textarea id="designed-task-goal" placeholder="Example: Research the current Python packaging release process and produce a concise implementation plan."></textarea>
+          </label>
+          <div class="form-row">
+            <label>Headcount
+              <input id="designed-task-headcount" type="number" min="3" value="6">
+            </label>
+            <label>Token budget
+              <input id="designed-task-token-budget" type="number" min="0" value="600000">
+            </label>
+            <label>Manager model
+              <input id="designed-task-management-model" value="openai/gpt-oss-120b:free">
+            </label>
+            <label>Worker model
+              <input id="designed-task-worker-model" value="poolside/laguna-m.1:free">
+            </label>
+          </div>
+          <div class="demo-actions">
+            <button class="primary-button" id="design-task-config" data-action="design-task-config">Design Org/Config</button>
+            <button class="primary-button" id="start-designed-task" data-action="start-designed-task">Start Confirmed Task</button>
+            <label style="display:inline-flex;grid-auto-flow:column;align-items:center;gap:6px;width:auto;">
+              <input id="designed-task-use-llm" type="checkbox" checked style="width:auto;"> use LLM
+            </label>
+            <label style="display:inline-flex;grid-auto-flow:column;align-items:center;gap:6px;width:auto;">
+              Filter task
+              <select id="task-filter-select" style="min-width:260px;"><option value="">All tasks</option></select>
+            </label>
+            <button id="export-task-trace" data-action="export-task-trace">Export Selected Task Trace</button>
+            <span class="pill" id="task-trace-export-status">trace idle</span>
+          </div>
+          <div class="operation-progress" id="designed-task-progress" aria-live="polite">
+            <div class="operation-progress-head">
+              <div>
+                <div class="operation-progress-title" id="designed-task-progress-title">No design request running.</div>
+                <div class="operation-progress-detail" id="designed-task-progress-detail">Click Design Org/Config to generate a draft organization.</div>
+              </div>
+              <span class="pill" id="designed-task-progress-elapsed">idle</span>
+            </div>
+            <div class="progress-track"><div class="progress-fill"></div></div>
+            <div class="progress-steps" id="designed-task-progress-steps"></div>
+          </div>
+          <div class="draft-org-panel">
+            <div class="draft-org-head">
+              <div class="draft-org-title">Draft Organization Tree</div>
+              <span class="pill" id="draft-org-summary">no draft</span>
+            </div>
+            <div id="draft-org-tree" class="muted">No draft yet.</div>
+          </div>
+          <label>Editable config JSON
+            <textarea class="config-editor" id="designed-task-config-json" spellcheck="false"></textarea>
+          </label>
+        </div>
+      </div>
+      <div class="panel span-12">
+        <div class="task-designer">
+          <div class="demo-panel">
+            <div class="demo-copy">
+              <div class="demo-title">Runtime Config</div>
+              <div class="muted">Unified Workforce Runtime JSON config. Save writes the effective config back to the configured JSON file.</div>
+            </div>
+            <div class="demo-actions">
+              <button id="load-runtime-config" data-action="load-runtime-config">Load Config</button>
+              <button class="primary-button" id="save-runtime-config" data-action="save-runtime-config">Save Config</button>
+              <span class="pill" id="runtime-config-status">config idle</span>
+            </div>
+          </div>
+          <textarea class="config-editor" id="runtime-config-json" spellcheck="false"></textarea>
+        </div>
+      </div>
       <div class="panel span-12">
         <div class="demo-panel">
           <div class="demo-copy">
@@ -1065,37 +2243,58 @@ HTML = r"""<!doctype html>
         </div>
       </div>
       <div class="panel span-12">
+        <div class="demo-panel">
+          <div class="demo-copy">
+            <div class="demo-title">Real LLM Benchmark</div>
+            <div class="muted">Runs org_designer plus OpenRouter manager and worker steps, then scores the run in this dashboard database.</div>
+          </div>
+          <div class="demo-actions">
+            <button class="primary-button" id="start-real-llm-benchmark" data-action="start-real-llm-benchmark">Start Real LLM Benchmark</button>
+            <span class="pill" id="real-llm-benchmark-status">idle</span>
+          </div>
+        </div>
+      </div>
+      <div class="panel span-12">
         <div class="org-toolbar">
           <h2>Org Chart</h2>
           <div class="muted" id="org-summary"></div>
         </div>
+        <div class="communication-pulses simple-only" id="communication-pulses"></div>
         <div id="org-chart"></div>
       </div>
-      <div class="panel span-6">
+      <div class="panel span-12">
+        <h2>Human Reports</h2>
+        <div class="human-reports" id="human-reports"></div>
+      </div>
+      <div class="panel span-12 debug-only">
+        <h2>Internal Manager Reports</h2>
+        <div class="manager-reports" id="manager-reports"></div>
+      </div>
+      <div class="panel span-6 debug-only">
         <h2>Agents</h2>
         <table id="agents"></table>
       </div>
-      <div class="panel span-6">
+      <div class="panel span-6 debug-only">
         <h2>Tasks</h2>
         <table id="tasks"></table>
       </div>
-      <div class="panel span-6">
+      <div class="panel span-6 debug-only">
         <h2>Agent Runs</h2>
         <table id="runs"></table>
       </div>
-      <div class="panel span-6">
+      <div class="panel span-6 debug-only">
         <h2>Reports</h2>
         <table id="reports"></table>
       </div>
-      <div class="panel span-12">
+      <div class="panel span-12 debug-only">
         <h2>Live Agent Output</h2>
         <div id="output"></div>
       </div>
-      <div class="panel span-6">
+      <div class="panel span-6 debug-only">
         <h2>Replay</h2>
         <pre id="replay"></pre>
       </div>
-      <div class="panel span-6">
+      <div class="panel span-6 debug-only">
         <h2>Trajectories</h2>
         <pre id="trajectories"></pre>
       </div>
@@ -1115,11 +2314,23 @@ HTML = r"""<!doctype html>
       "task_status_updated",
       "discussion_message",
       "report_registered",
+      "human_report_registered",
       "manager_review_created",
       "manager_review_decided",
       "progress_checked",
       "agent_hired",
+      "agent_profile_updated",
       "system_prompt_updated",
+      "task_document_upserted",
+      "tool_request_submitted",
+      "tool_request_approved",
+      "tool_request_rejected",
+      "agent_run_path_registered",
+      "agent_run_attempt_started",
+      "agent_run_attempt_failed",
+      "agent_run_retrying",
+      "trace_file_written",
+      "runtime_config_updated",
     ]);
     const esc = (value) => String(value ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const statusClass = (value) => esc(value).replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -1138,8 +2349,27 @@ HTML = r"""<!doctype html>
     let expandedNodes = new Set();
     let collapsedNodes = new Set();
     let selectedAgentId = null;
+    let selectedTaskId = "";
+    let currentTaskScope = new Set();
     let visibleNodeCount = 0;
+    let dashboardMode = localStorage.getItem("workforceDashboardMode") || "simple";
+    let communicationPulses = [];
     let longRfcDemoStatus = { status: "idle", running: false };
+    let realLlmBenchmarkStatus = { status: "idle", running: false };
+    let designedTaskStatus = { status: "idle", running: false };
+    let designedTaskConfig = null;
+    let designedTaskProgress = {
+      active: false,
+      state: "idle",
+      phase: "idle",
+      title: "No design request running.",
+      detail: "Click Design Org/Config to generate a draft organization.",
+      startedAt: 0,
+      finishedAt: 0,
+    };
+    let designedTaskProgressTimer = null;
+    let runtimeConfig = null;
+    let refreshScheduled = false;
 
     function deepMerge(base, override) {
       const result = {...base};
@@ -1163,26 +2393,193 @@ HTML = r"""<!doctype html>
     }
 
     function renderOutput() {
-      document.getElementById("output").innerHTML = liveOutput.slice(-cfg("activity", "global_output_limit", 200)).map(o =>
-        `<div class="output-line"><span class="pill">${esc(o.task_id || "-")} ${esc(o.agent_id)} ${esc(o.stream || "output")}</span> ${esc(o.text || "")}</div>`
-      ).join("") || `<div class="muted">No agent output.</div>`;
+      const groupedOutput = aggregateOutputItems(liveOutput).slice(-cfg("activity", "global_output_limit", 200));
+      document.getElementById("output").innerHTML = groupedOutput.map(renderOutputBlock).join("") || `<div class="muted">No agent output.</div>`;
+    }
+
+    function renderOutputBlock(item) {
+      const label = `${item.task_id || "-"} ${item.agent_id || "-"} ${item.stream || "output"}`;
+      return `<div class="output-block">
+        <div><span class="pill">${esc(label)}</span></div>
+        <div class="output-text">${esc(item.text || "")}</div>
+      </div>`;
+    }
+
+    function aggregateOutputItems(items) {
+      const groups = [];
+      for (const item of items || []) {
+        const last = groups[groups.length - 1];
+        if (last && sameOutputStream(last, item)) {
+          last.text = appendStreamText(last.text || "", item.text || "");
+          last.timestamp = item.timestamp || last.timestamp;
+          last.event_id = item.event_id || last.event_id;
+        } else {
+          groups.push({ ...item, text: String(item.text || "") });
+        }
+      }
+      return groups;
+    }
+
+    function appendOutputItem(items, item, limit) {
+      const last = items[items.length - 1];
+      if (last && sameOutputStream(last, item)) {
+        last.text = appendStreamText(last.text || "", item.text || "");
+        last.timestamp = item.timestamp || last.timestamp;
+        last.event_id = item.event_id || last.event_id;
+      } else {
+        items.push({ ...item, text: String(item.text || "") });
+      }
+      return items.slice(-limit);
+    }
+
+    function sameOutputStream(left, right) {
+      return String(left?.agent_id || "") === String(right?.agent_id || "")
+        && String(left?.task_id || "") === String(right?.task_id || "")
+        && String(left?.run_id || "") === String(right?.run_id || "")
+        && String(left?.stream || "output") === String(right?.stream || "output");
+    }
+
+    function appendStreamText(current, next) {
+      return String(current || "") + String(next || "");
     }
 
     function renderDemoStatus() {
-      const label = document.getElementById("long-rfc-demo-status");
-      const button = document.getElementById("start-long-rfc-demo");
+      renderRunStatus({
+        labelId: "long-rfc-demo-status",
+        buttonId: "start-long-rfc-demo",
+        statusPayload: longRfcDemoStatus,
+        resultText: longRfcDemoStatus?.result?.final_status ? ` final=${longRfcDemoStatus.result.final_status}` : "",
+      });
+      const benchmarkResult = realLlmBenchmarkStatus?.result;
+      const overall = (benchmarkResult?.scores || []).find(score => score.name === "overall");
+      renderRunStatus({
+        labelId: "real-llm-benchmark-status",
+        buttonId: "start-real-llm-benchmark",
+        statusPayload: realLlmBenchmarkStatus,
+        resultText: benchmarkResult?.ok != null ? ` ok=${benchmarkResult.ok} score=${overall ? overall.score : ""}` : "",
+      });
+      const designedResult = designedTaskStatus?.result;
+      renderRunStatus({
+        labelId: "designed-task-status",
+        buttonId: "start-designed-task",
+        statusPayload: designedTaskStatus,
+        resultText: designedResult?.root_task_id ? ` root=${designedResult.root_task_id}` : designedTaskStatus?.root_task_id ? ` root=${designedTaskStatus.root_task_id}` : "",
+      });
+      const designButton = document.getElementById("design-task-config");
+      if (designButton) designButton.disabled = Boolean(designedTaskStatus?.running);
+    }
+
+    function renderRunStatus({labelId, buttonId, statusPayload, resultText}) {
+      const label = document.getElementById(labelId);
+      const button = document.getElementById(buttonId);
       if (!label || !button) return;
-      const status = longRfcDemoStatus?.status || "idle";
-      const runId = longRfcDemoStatus?.run_id ? ` ${longRfcDemoStatus.run_id}` : "";
-      const result = longRfcDemoStatus?.result?.final_status ? ` final=${longRfcDemoStatus.result.final_status}` : "";
-      const error = longRfcDemoStatus?.error ? ` error=${clip(longRfcDemoStatus.error, 90)}` : "";
-      label.textContent = `${status}${runId}${result}${error}`;
-      button.disabled = Boolean(longRfcDemoStatus?.running);
+      const status = statusPayload?.status || "idle";
+      const runId = statusPayload?.run_id ? ` ${statusPayload.run_id}` : "";
+      const error = statusPayload?.error ? ` error=${clip(statusPayload.error, 90)}` : "";
+      label.textContent = `${status}${runId}${resultText || ""}${error}`;
+      button.disabled = Boolean(statusPayload?.running);
+    }
+
+    function startDesignedProgress({ phase, title, detail }) {
+      designedTaskProgress = {
+        active: true,
+        state: "active",
+        phase,
+        title,
+        detail,
+        startedAt: Date.now(),
+        finishedAt: 0,
+      };
+      if (designedTaskProgressTimer) window.clearInterval(designedTaskProgressTimer);
+      designedTaskProgressTimer = window.setInterval(renderDesignedProgress, 1000);
+      renderDesignedProgress();
+    }
+
+    function updateDesignedProgress({ phase, title, detail }) {
+      designedTaskProgress = {
+        ...designedTaskProgress,
+        active: true,
+        state: "active",
+        phase: phase || designedTaskProgress.phase,
+        title: title || designedTaskProgress.title,
+        detail: detail || designedTaskProgress.detail,
+      };
+      renderDesignedProgress();
+    }
+
+    function finishDesignedProgress({ state = "finished", phase = "done", title, detail }) {
+      if (designedTaskProgressTimer) {
+        window.clearInterval(designedTaskProgressTimer);
+        designedTaskProgressTimer = null;
+      }
+      designedTaskProgress = {
+        ...designedTaskProgress,
+        active: false,
+        state,
+        phase,
+        title: title || designedTaskProgress.title,
+        detail: detail || designedTaskProgress.detail,
+        finishedAt: Date.now(),
+      };
+      renderDesignedProgress();
+    }
+
+    function renderDesignedProgress() {
+      const panel = document.getElementById("designed-task-progress");
+      if (!panel) return;
+      const title = document.getElementById("designed-task-progress-title");
+      const detail = document.getElementById("designed-task-progress-detail");
+      const elapsed = document.getElementById("designed-task-progress-elapsed");
+      const steps = document.getElementById("designed-task-progress-steps");
+      panel.classList.toggle("active", Boolean(designedTaskProgress.active));
+      panel.classList.toggle("finished", designedTaskProgress.state === "finished");
+      panel.classList.toggle("failed", designedTaskProgress.state === "failed");
+      if (title) title.textContent = designedTaskProgress.title || "No design request running.";
+      if (detail) detail.textContent = designedTaskProgress.detail || "";
+      if (elapsed) {
+        if (designedTaskProgress.startedAt) {
+          const end = designedTaskProgress.active ? Date.now() : (designedTaskProgress.finishedAt || Date.now());
+          elapsed.textContent = `${Math.max(0, Math.round((end - designedTaskProgress.startedAt) / 1000))}s elapsed`;
+        } else {
+          elapsed.textContent = "idle";
+        }
+      }
+      if (steps) steps.innerHTML = renderDesignedProgressSteps(designedTaskProgress.phase);
+    }
+
+    function renderDesignedProgressSteps(activePhase) {
+      const items = [
+        ["validate", "validate goal"],
+        ["request", "send request"],
+        ["model", "wait for model"],
+        ["render", "render draft"],
+        ["done", "ready"],
+      ];
+      return items.map(([phase, label]) =>
+        `<span class="progress-step ${phase === activePhase ? "active" : ""}">${esc(label)}</span>`
+      ).join("");
+    }
+
+    function nextPaint() {
+      return new Promise(resolve => window.requestAnimationFrame(() => window.setTimeout(resolve, 0)));
     }
 
     async function refreshDemoStatus() {
-      const res = await fetch("/api/demos/long-rfc/status", { cache: "no-store" });
-      longRfcDemoStatus = await res.json();
+      const [longRes, benchmarkRes, designedRes] = await Promise.all([
+        fetch("/api/demos/long-rfc/status", { cache: "no-store" }),
+        fetch("/api/demos/real-llm-benchmark/status", { cache: "no-store" }),
+        fetch("/api/designed-task/status", { cache: "no-store" }),
+      ]);
+      longRfcDemoStatus = await longRes.json();
+      realLlmBenchmarkStatus = await benchmarkRes.json();
+      const serverDesignedTaskStatus = await designedRes.json();
+      if (designedTaskStatus?.status !== "designing") {
+        designedTaskStatus = serverDesignedTaskStatus;
+      }
+      if (designedTaskStatus?.root_task_id && !selectedTaskId) {
+        selectedTaskId = designedTaskStatus.root_task_id;
+        scheduleRefresh(0);
+      }
       renderDemoStatus();
     }
 
@@ -1202,13 +2599,407 @@ HTML = r"""<!doctype html>
       await refresh();
     }
 
+    async function startRealLlmBenchmark() {
+      realLlmBenchmarkStatus = { status: "starting", running: true };
+      renderDemoStatus();
+      const res = await fetch("/api/demos/real-llm-benchmark/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ judge: "heuristic", use_llm: true, reset: true })
+      });
+      realLlmBenchmarkStatus = await res.json();
+      if (!res.ok && !realLlmBenchmarkStatus.error) {
+        realLlmBenchmarkStatus.error = `HTTP ${res.status}`;
+      }
+      renderDemoStatus();
+      await refresh();
+    }
+
+    async function designTaskConfig() {
+      const goal = document.getElementById("designed-task-goal").value.trim();
+      if (!goal) {
+        designedTaskStatus = { status: "failed", running: false, error: "Enter a task goal first." };
+        finishDesignedProgress({
+          state: "failed",
+          phase: "validate",
+          title: "Design request was not started.",
+          detail: "Enter a task goal first.",
+        });
+        renderDemoStatus();
+        return;
+      }
+      designedTaskStatus = { status: "designing", running: true };
+      renderDemoStatus();
+      const payload = {
+        goal,
+        headcount_limit: Number(document.getElementById("designed-task-headcount").value || runtimeConfig?.designed_task?.headcount_limit || 6),
+        token_budget: Number(document.getElementById("designed-task-token-budget").value || runtimeConfig?.designed_task?.token_budget || 600000),
+        management_model: document.getElementById("designed-task-management-model").value.trim() || runtimeConfig?.designed_task?.management_model || "openai/gpt-oss-120b:free",
+        worker_model: document.getElementById("designed-task-worker-model").value.trim() || runtimeConfig?.designed_task?.worker_model || "poolside/laguna-m.1:free",
+        use_llm: document.getElementById("designed-task-use-llm").checked,
+      };
+      startDesignedProgress({
+        phase: "request",
+        title: "Designing organization/config draft...",
+        detail: payload.use_llm
+          ? `Request is being sent to org_designer with ${payload.management_model}; free OpenRouter models can take a while.`
+          : "Running local heuristic org designer.",
+      });
+      await nextPaint();
+      updateDesignedProgress({
+        phase: payload.use_llm ? "model" : "render",
+        detail: payload.use_llm
+          ? "Waiting for the model response. The server is still working until this changes to ready or failed."
+          : "Building the draft organization locally.",
+      });
+      const res = await fetch("/api/designed-task/design", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        designedTaskStatus = { status: "failed", running: false, error: data.error || `HTTP ${res.status}` };
+        finishDesignedProgress({
+          state: "failed",
+          phase: "model",
+          title: "Design failed.",
+          detail: data.error || `HTTP ${res.status}`,
+        });
+        renderDemoStatus();
+        return;
+      }
+      updateDesignedProgress({
+        phase: "render",
+        title: "Rendering draft organization tree...",
+        detail: "Model response received. Parsing config JSON and drawing the hierarchy.",
+      });
+      designedTaskConfig = data.config;
+      document.getElementById("designed-task-config-json").value = JSON.stringify(designedTaskConfig, null, 2);
+      designedTaskStatus = { status: "draft_ready", running: false, error: "" };
+      renderDraftOrganizationTree();
+      finishDesignedProgress({
+        state: "finished",
+        phase: "done",
+        title: "Draft organization is ready.",
+        detail: `Generated ${designedTaskConfig?.organization?.agents?.length || 0} agents. Review the tree or JSON, then start the task.`,
+      });
+      renderDemoStatus();
+    }
+
+    async function startDesignedTask() {
+      const editor = document.getElementById("designed-task-config-json");
+      let config;
+      try {
+        config = JSON.parse(editor.value || "{}");
+      } catch (err) {
+        designedTaskStatus = { status: "failed", running: false, error: `Invalid JSON: ${err}` };
+        finishDesignedProgress({
+          state: "failed",
+          phase: "validate",
+          title: "Cannot start task.",
+          detail: `Invalid JSON: ${err}`,
+        });
+        renderDemoStatus();
+        return;
+      }
+      designedTaskConfig = config;
+      renderDraftOrganizationTree();
+      designedTaskStatus = { status: "starting", running: true };
+      selectedTaskId = "";
+      currentTaskScope = new Set();
+      startDesignedProgress({
+        phase: "request",
+        title: "Starting confirmed task run...",
+        detail: "Submitting the confirmed config to the runtime and waiting for the root task id.",
+      });
+      renderDemoStatus();
+      await nextPaint();
+      const res = await fetch("/api/designed-task/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config })
+      });
+      designedTaskStatus = await res.json();
+      if (!res.ok && !designedTaskStatus.error) {
+        designedTaskStatus.error = `HTTP ${res.status}`;
+      }
+      if (res.ok && !designedTaskStatus.error) {
+        finishDesignedProgress({
+          state: "finished",
+          phase: "done",
+          title: "Task run has started.",
+          detail: designedTaskStatus.root_task_id
+            ? `Root task: ${designedTaskStatus.root_task_id}. Watch the org chart, task filter, replay, and live output below.`
+            : "Runtime accepted the task. Watch the org chart, task filter, replay, and live output below.",
+        });
+      } else {
+        finishDesignedProgress({
+          state: "failed",
+          phase: "request",
+          title: "Task run failed to start.",
+          detail: designedTaskStatus.error || `HTTP ${res.status}`,
+        });
+      }
+      renderDemoStatus();
+      await refresh();
+    }
+
+    function setRuntimeConfigStatus(text) {
+      const status = document.getElementById("runtime-config-status");
+      if (status) status.textContent = text;
+    }
+
+    function setTraceExportStatus(html) {
+      const status = document.getElementById("task-trace-export-status");
+      if (status) status.innerHTML = html;
+    }
+
+    async function loadRuntimeConfig() {
+      setRuntimeConfigStatus("loading");
+      const res = await fetch("/api/runtime-config", { cache: "no-store" });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setRuntimeConfigStatus(data.error || `HTTP ${res.status}`);
+        return;
+      }
+      runtimeConfig = data.config || {};
+      document.getElementById("runtime-config-json").value = JSON.stringify(runtimeConfig, null, 2);
+      applyRuntimeConfigDefaults();
+      setRuntimeConfigStatus(`loaded ${data.path || ""}`.trim());
+    }
+
+    async function saveRuntimeConfig() {
+      const editor = document.getElementById("runtime-config-json");
+      let config;
+      try {
+        config = JSON.parse(editor.value || "{}");
+      } catch (err) {
+        setRuntimeConfigStatus(`invalid JSON: ${err}`);
+        return;
+      }
+      setRuntimeConfigStatus("saving");
+      const res = await fetch("/api/runtime-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setRuntimeConfigStatus(data.error || `HTTP ${res.status}`);
+        return;
+      }
+      runtimeConfig = data.config || {};
+      editor.value = JSON.stringify(runtimeConfig, null, 2);
+      applyRuntimeConfigDefaults();
+      setRuntimeConfigStatus(`saved ${data.path || ""}`.trim());
+      await refresh();
+    }
+
+    function applyRuntimeConfigDefaults() {
+      const defaults = runtimeConfig?.designed_task || {};
+      const setValue = (id, value) => {
+        const element = document.getElementById(id);
+        if (element && value != null) {
+          element.value = value;
+        }
+      };
+      setValue("designed-task-headcount", defaults.headcount_limit);
+      setValue("designed-task-token-budget", defaults.token_budget);
+      setValue("designed-task-management-model", defaults.management_model);
+      setValue("designed-task-worker-model", defaults.worker_model);
+      const useLlm = document.getElementById("designed-task-use-llm");
+      if (useLlm && defaults.use_llm != null) useLlm.checked = Boolean(defaults.use_llm);
+    }
+
+    async function exportSelectedTaskTrace() {
+      if (!selectedTaskId) {
+        setTraceExportStatus("select a task first");
+        return;
+      }
+      setTraceExportStatus("exporting");
+      const res = await fetch("/api/tasks/export-trace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task_id: selectedTaskId, include_descendants: true })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setTraceExportStatus(esc(data.error || `HTTP ${res.status}`));
+        return;
+      }
+      setTraceExportStatus(`<a href="${esc(data.url)}" target="_blank" rel="noreferrer">trace file</a>`);
+      await refresh();
+    }
+
+    function readDesignedTaskConfigFromEditor() {
+      const editor = document.getElementById("designed-task-config-json");
+      const text = editor?.value?.trim() || "";
+      if (!text) return { config: designedTaskConfig, error: "" };
+      try {
+        const config = JSON.parse(text);
+        designedTaskConfig = config;
+        return { config, error: "" };
+      } catch (err) {
+        return { config: null, error: String(err) };
+      }
+    }
+
+    function renderDraftOrganizationTree() {
+      const treeHost = document.getElementById("draft-org-tree");
+      const summary = document.getElementById("draft-org-summary");
+      if (!treeHost || !summary) return;
+      const { config, error } = readDesignedTaskConfigFromEditor();
+      if (error) {
+        summary.textContent = "invalid JSON";
+        treeHost.innerHTML = `<div class="org-placeholder">Cannot render draft tree: ${esc(error)}</div>`;
+        return;
+      }
+      const organization = config?.organization || {};
+      const agents = Array.isArray(organization.agents) ? organization.agents : [];
+      if (!agents.length) {
+        summary.textContent = "no draft";
+        treeHost.innerHTML = `<div class="muted">No draft yet.</div>`;
+        return;
+      }
+      const tree = buildDraftAgentTree(agents);
+      const companyName = organization.company?.name || config?.case?.title || "designed org";
+      summary.textContent = `${agents.length} agents - ${companyName}`;
+      treeHost.innerHTML = `<ul class="draft-tree">${tree.map(node => renderDraftAgentNode(node)).join("")}</ul>`;
+    }
+
+    function buildDraftAgentTree(agents) {
+      const nodeById = new Map();
+      const roots = [];
+      for (const agent of agents || []) {
+        const id = String(agent.id || agent.name || `agent_${nodeById.size + 1}`);
+        nodeById.set(id, { ...agent, id, children: [] });
+      }
+      for (const node of nodeById.values()) {
+        const managerId = node.manager_id == null ? "" : String(node.manager_id);
+        const manager = managerId ? nodeById.get(managerId) : null;
+        if (manager) {
+          manager.children.push(node);
+        } else {
+          roots.push(node);
+        }
+      }
+      return roots;
+    }
+
+    function renderDraftAgentNode(node) {
+      const children = node.children || [];
+      const role = node.role || "";
+      const type = node.worker_type || "";
+      const nodeClass = draftAgentClass(node);
+      const responsibilities = (node.responsibilities || []).slice(0, 3).join(", ");
+      const childrenMarkup = children.length
+        ? `<ul class="draft-children">${children.map(renderDraftAgentNode).join("")}</ul>`
+        : "";
+      return `<li class="draft-node">
+        <div class="draft-card ${esc(nodeClass)}">
+          <div class="draft-card-head">
+            <div>
+              <div class="draft-agent-name">${esc(node.name || node.id)}</div>
+              <div class="draft-agent-role">${esc(role || "Agent")} ${node.department ? "- " + esc(node.department) : ""}</div>
+            </div>
+            <span class="draft-badge">${esc(node.id)}</span>
+          </div>
+          <div class="draft-agent-meta">${esc(type || "worker")} - ${esc(node.model || "no model")}</div>
+          ${responsibilities ? `<div class="draft-agent-responsibilities">${esc(responsibilities)}</div>` : ""}
+        </div>
+        ${childrenMarkup}
+      </li>`;
+    }
+
+    function draftAgentClass(node) {
+      const text = `${node.role || ""} ${node.worker_type || ""} ${node.department || ""}`.toLowerCase();
+      if (text.includes("ceo") || text.includes("chief") || text.includes("executive")) return "executive";
+      if (text.includes("hr") || text.includes("human resources")) return "hr";
+      if (text.includes("manager") || text.includes("lead") || text.includes("vp")) return "manager";
+      if (text.includes("worker") || text.includes("analyst") || text.includes("research")) return "worker";
+      return "generic";
+    }
+
     function renderOrgChart() {
+      renderModeControls();
       visibleNodeCount = 0;
       const agentCount = agents.length || countNodes(orgChart);
-      document.getElementById("org-summary").textContent = `${agentCount} agents - collapse depth ${cfg("dashboard", "collapse_depth", 3)}`;
+      document.body.classList.toggle("mode-simple", dashboardMode === "simple");
+      document.body.classList.toggle("mode-debug", dashboardMode === "debug");
+      document.getElementById("org-summary").textContent = `${agentCount} agents - ${dashboardMode} mode - collapse depth ${cfg("dashboard", "collapse_depth", 3)}`;
+      renderCommunicationPulses();
       document.getElementById("org-chart").innerHTML = orgChart.length
         ? `<ul class="org-tree">${orgChart.map(node => renderOrgNode(node, 0)).join("")}</ul>`
         : `<div class="muted">No agents.</div>`;
+    }
+
+    function renderModeControls() {
+      document.body.classList.toggle("mode-simple", dashboardMode === "simple");
+      document.body.classList.toggle("mode-debug", dashboardMode === "debug");
+      const simple = document.getElementById("mode-simple");
+      const debug = document.getElementById("mode-debug");
+      if (simple) simple.classList.toggle("active", dashboardMode === "simple");
+      if (debug) debug.classList.toggle("active", dashboardMode === "debug");
+    }
+
+    function renderCommunicationPulses() {
+      const host = document.getElementById("communication-pulses");
+      if (!host) return;
+      const now = Date.now();
+      communicationPulses = communicationPulses.filter(pulse => pulse.expiresAt > now);
+      host.innerHTML = communicationPulses.length
+        ? communicationPulses.map(pulse => `<div class="communication-pulse ${esc(pulse.kind || "")}">${esc(pulse.text)}</div>`).join("")
+        : `<div class="muted">No recent assignments, discussions, or reports.</div>`;
+    }
+
+    function appendCommunicationPulse(event) {
+      const pulse = communicationPulseFromEvent(event);
+      if (!pulse) return;
+      communicationPulses.push({
+        ...pulse,
+        id: event.event_id || `${Date.now()}_${communicationPulses.length}`,
+        expiresAt: Date.now() + 4500,
+      });
+      communicationPulses = communicationPulses.slice(-8);
+      renderCommunicationPulses();
+      window.setTimeout(renderCommunicationPulses, 4700);
+    }
+
+    function communicationPulseFromEvent(event) {
+      const payload = event.payload || {};
+      const actor = event.actor_id || payload.from_agent_id || "system";
+      const tool = payload.tool_name || "";
+      if (event.event_type === "discussion_message") {
+        const target = payload.to_agent_id || payload.target_agent_id || "peer";
+        return { kind: "discuss", text: `${actor} discussed with ${target}: ${clip(payload.message || "", 80)}` };
+      }
+      if (event.event_type === "report_registered") {
+        const target = payload.to_agent_id || "manager";
+        return { kind: "report", text: `${actor} reported to ${target}: ${clip(payload.summary || payload.status || "", 80)}` };
+      }
+      if (event.event_type === "human_report_registered") {
+        return { kind: "human", text: `${actor} reported to human: ${clip(payload.title || payload.message || "", 80)}` };
+      }
+      if (!isToolCallEvent(event.event_type || "")) return null;
+      if (tool === "assign") {
+        const target = payload.to_agent_id || payload.assigned_to || payload.target_agent_id || "worker";
+        const verb = event.event_type.endsWith("_started") ? "assigning" : event.event_type.endsWith("_finished") ? "assigned" : "assign";
+        return { kind: "assign", text: `${actor} ${verb} ${target}: ${clip(payload.title || payload.message || payload.task_id || "", 80)}` };
+      }
+      if (tool === "discuss") {
+        const target = payload.to_agent_id || payload.target_agent_id || "peer";
+        return { kind: "discuss", text: `${actor} discussing with ${target}: ${clip(payload.message || "", 80)}` };
+      }
+      if (tool === "report" || tool === "report_to_human") {
+        const target = tool === "report_to_human" ? "human" : (payload.to_agent_id || "manager");
+        return { kind: tool === "report_to_human" ? "human" : "report", text: `${actor} reporting to ${target}: ${clip(payload.title || payload.message || payload.report_id || "", 80)}` };
+      }
+      if (tool === "check_progress") {
+        const target = payload.to_agent_id || payload.target_agent_id || payload.worker_id || "worker";
+        return { kind: "report", text: `${actor} checking progress with ${target}` };
+      }
+      return null;
     }
 
     function renderOrgNode(node, depth) {
@@ -1219,7 +3010,7 @@ HTML = r"""<!doctype html>
       }
       visibleNodeCount += 1;
       const activity = ensureAgentActivity(node.id, node.activity);
-      const summary = activity.summary || node.summary || summarizeActivity(activity, node);
+      const summary = summarizeActivity(activity, node);
       const active = Boolean(summary.active || (node.current_task_ids || []).length || node.status === "busy" || node.status === "blocked");
       const work = (node.current_task_ids || []).join(", ") || "-";
       const children = node.children || [];
@@ -1233,6 +3024,9 @@ HTML = r"""<!doctype html>
           ? `<ul class="org-children"><li class="org-node"><div class="org-placeholder">${esc(children.length)} direct report(s), ${esc(node.descendant_count || children.length)} total below.</div></li></ul>`
           : `<ul class="org-children">${children.map(child => renderOrgNode(child, depth + 1)).join("")}</ul>`
         : "";
+      if (dashboardMode !== "debug") {
+        return renderSimpleOrgNode({ node, depth, summary, active, work, toggle, childrenMarkup });
+      }
       return `<li class="org-node">
         <div class="agent-node ${active ? "active" : ""}" data-agent-id="${esc(node.id)}">
           <div class="agent-node-head">
@@ -1256,10 +3050,39 @@ HTML = r"""<!doctype html>
             <span class="summary-text">${esc(summary.text || "Idle.")}</span>
           </div>
           <div class="activity-grid">
-            ${renderActivityBlock("Output", activity.output, renderOutputItem)}
+            ${renderActivityBlock("Output", aggregateOutputItems(activity.output), renderOutputItem)}
+            ${(activity.errors || []).length ? renderActivityBlock("Errors", aggregateOutputItems(activity.errors), renderErrorItem) : ""}
             ${renderActivityBlock("Tools", activity.tools, renderToolItem)}
             ${renderActivityBlock("Events", activity.events, renderEventItem)}
           </div>
+        </div>
+        ${childrenMarkup}
+      </li>`;
+    }
+
+    function renderSimpleOrgNode({ node, summary, active, work, toggle, childrenMarkup }) {
+      const status = node.status || "idle";
+      return `<li class="org-node">
+        <div class="agent-node simple-agent-node ${active ? "active" : ""}" data-agent-id="${esc(node.id)}">
+          <div class="simple-agent-main">
+            <div class="agent-title">
+              ${renderAgentIcon(node.icon)}
+              <div>
+                <div class="agent-name">${esc(node.name || node.id)}</div>
+                <div class="simple-agent-role">${esc(node.role || "Agent")} - ${esc(node.worker_type || "")}</div>
+              </div>
+            </div>
+            <div class="agent-controls">
+              ${toggle}
+              <button data-action="agent-detail" data-agent-detail="${esc(node.id)}">Open</button>
+              <span class="status ${statusClass(status)}">${esc(status)}</span>
+            </div>
+          </div>
+          <div class="simple-agent-summary ${active ? "active" : ""}">
+            <span class="summary-dot"></span>
+            <span class="summary-text">${esc(summary.text || "Idle.")}</span>
+          </div>
+          <div class="simple-agent-work">tasks: ${esc(work)}</div>
         </div>
         ${childrenMarkup}
       </li>`;
@@ -1300,7 +3123,89 @@ HTML = r"""<!doctype html>
     }
 
     function renderOutputItem(item) {
-      return `<div class="activity-item">${esc(item.stream || "output")}: ${esc(item.text || "")}</div>`;
+      const label = item.stream === "error" ? "Error" : (item.stream || "output");
+      const cls = item.stream === "error" ? " activity-error" : "";
+      return `<div class="output-block${cls}">
+        <div><span class="pill">${esc(label)}</span></div>
+        <div class="output-text">${esc(item.text || "")}</div>
+      </div>`;
+    }
+
+    function renderErrorItem(item) {
+      return `<div class="activity-item activity-error">Error: ${esc(item.text || "")}</div>`;
+    }
+
+    function renderHumanReports(reports) {
+      const host = document.getElementById("human-reports");
+      if (!host) return;
+      const items = (reports || []).slice().reverse();
+      host.innerHTML = items.length
+        ? items.map(renderHumanReportCard).join("")
+        : `<div class="muted">No CEO report to human yet.</div>`;
+    }
+
+    function renderHumanReportCard(report) {
+      const confidence = report.confidence == null ? "" : ` confidence=${Number(report.confidence).toFixed(2)}`;
+      const status = report.status ? ` status=${report.status}` : "";
+      const decision = report.requires_decision ? `<span class="pill">human decision needed</span>` : `<span class="pill">for human</span>`;
+      const nextAction = report.next_action
+        ? `<div class="human-report-next">Next action: ${esc(report.next_action)}</div>`
+        : "";
+      return `<div class="human-report-card ${report.requires_decision ? "requires-decision" : ""}">
+        <div class="human-report-head">
+          <div>
+            <div class="human-report-title">${esc(report.title || "CEO report to human")}</div>
+            <div class="human-report-meta">from ${esc(report.from_agent_id || "-")} task=${esc(report.task_id || "-")}${esc(status)}${esc(confidence)}</div>
+          </div>
+          ${decision}
+        </div>
+        <div class="human-report-message">${esc(report.message || "")}</div>
+        ${nextAction}
+      </div>`;
+    }
+
+    function renderManagerReports(reports) {
+      const host = document.getElementById("manager-reports");
+      if (!host) return;
+      const items = (reports || []).slice().reverse();
+      host.innerHTML = items.length
+        ? items.map(renderManagerReportCard).join("")
+        : `<div class="muted">No internal manager report yet.</div>`;
+    }
+
+    function renderManagerReportCard(report) {
+      const confidence = report.confidence == null ? "" : ` confidence=${Number(report.confidence).toFixed(2)}`;
+      const decision = report.requires_decision ? `<span class="pill">manager decision needed</span>` : `<span class="pill">${esc(report.status || "report")}</span>`;
+      const workDone = (report.work_done || []).length
+        ? `<div class="manager-report-next">Work done: ${esc((report.work_done || []).join("; "))}</div>`
+        : "";
+      const evidence = renderReportEvidence(report.evidence || []);
+      const nextAction = report.next_action
+        ? `<div class="manager-report-next">Next action: ${esc(report.next_action)}</div>`
+        : "";
+      return `<div class="manager-report-card">
+        <div class="manager-report-head">
+          <div>
+            <div class="manager-report-title">${esc(report.report_id || "manager report")}</div>
+            <div class="manager-report-meta">${esc(report.from_agent_id || "-")} -> ${esc(report.to_agent_id || "-")} task=${esc(report.task_id || "-")}${esc(confidence)}</div>
+          </div>
+          ${decision}
+        </div>
+        <div class="manager-report-summary">${esc(report.summary || "")}</div>
+        ${workDone}
+        ${evidence}
+        ${nextAction}
+      </div>`;
+    }
+
+    function renderReportEvidence(evidenceItems) {
+      const evidence = (evidenceItems || []).slice(0, 4).map(item => {
+        const type = item?.type || "evidence";
+        const path = item?.path || "";
+        if (path) return `${esc(type)} ${renderFileLink(path, "file")}`;
+        return esc(type);
+      }).join(" ");
+      return evidence ? `<div class="manager-report-evidence">Evidence: ${evidence}</div>` : "";
     }
 
     function renderToolItem(item) {
@@ -1315,27 +3220,18 @@ HTML = r"""<!doctype html>
 
     function ensureAgentActivity(agentId, fallback = null) {
       if (!agentActivity[agentId]) {
-        agentActivity[agentId] = fallback || { output: [], full_output: [], tools: [], events: [] };
+        agentActivity[agentId] = fallback || { output: [], full_output: [], errors: [], tools: [], events: [] };
       }
       if (!agentActivity[agentId].output) agentActivity[agentId].output = [];
       if (!agentActivity[agentId].full_output) agentActivity[agentId].full_output = [...agentActivity[agentId].output];
+      if (!agentActivity[agentId].errors) agentActivity[agentId].errors = [];
       if (!agentActivity[agentId].tools) agentActivity[agentId].tools = [];
       if (!agentActivity[agentId].events) agentActivity[agentId].events = [];
       return agentActivity[agentId];
     }
 
     function summarizeActivity(activity, node = null) {
-      if (activity?.summary?.text) return activity.summary;
       const candidates = [];
-      const output = (activity.full_output || activity.output || []).slice(-1)[0];
-      if (output) {
-        candidates.push({
-          timestamp: output.timestamp || "",
-          text: `${output.stream || "output"}: ${clip(output.text || "")}`,
-          task_id: output.task_id || "",
-          event_type: output.event_type || "output",
-        });
-      }
       const tool = (activity.tools || []).slice(-1)[0];
       if (tool) {
         const target = tool.target_agent_id ? ` -> ${tool.target_agent_id}` : "";
@@ -1364,17 +3260,22 @@ HTML = r"""<!doctype html>
       if ((node?.current_task_ids || []).length) {
         return {mode: "local", text: `Working on ${(node.current_task_ids || []).join(", ")}`, active: true};
       }
+      if (node?.status === "busy" || node?.status === "blocked" || node?.status === "assigned" || node?.status === "in_progress") {
+        return {mode: "local", text: `Status: ${node.status}`, active: true};
+      }
       return {mode: "local", text: "Idle.", active: false};
     }
 
     function compactEventDetail(event) {
       const payload = event.payload || {};
-      const keys = ["tool_name", "assigned_to", "to_agent_id", "target_agent_id", "status", "stream", "returncode", "timed_out", "report_id", "decision", "message"];
+      const keys = ["tool_name", "requested_tool_name", "assigned_to", "to_agent_id", "target_agent_id", "profile_agent_id", "status", "stream", "returncode", "timed_out", "report_id", "human_report_id", "decision", "title", "message", "url", "trace_path", "run_dir", "prompt_path", "response_path", "raw_response_path", "error_path", "attempt", "max_attempts", "next_attempt", "delay_seconds", "doc_id", "request_id", "revision"];
       return keys.filter(key => payload[key] != null).map(key => `${key}=${clip(payload[key], 120)}`).join(" ");
     }
 
     function appendAgentEvent(event) {
+      if (selectedTaskId && !eventMatchesCurrentTaskFilter(event)) return;
       if (!event.actor_id) return;
+      appendCommunicationPulse(event);
       const activity = ensureAgentActivity(event.actor_id);
       if (event.event_type === "worker_output" || event.event_type === "agent_output") {
         const item = {
@@ -1387,12 +3288,17 @@ HTML = r"""<!doctype html>
           stream: event.payload?.stream,
           text: event.payload?.text,
         };
-        liveOutput.push(item);
-        activity.output.push(item);
-        activity.full_output.push(item);
-        activity.output = activity.output.slice(-cfg("activity", "recent_output_items", 12));
-        activity.full_output = activity.full_output.slice(-cfg("activity", "full_stream_limit", 200));
-      } else if ((event.event_type || "").startsWith("mcp_tool_call_")) {
+        liveOutput = appendOutputItem(liveOutput, item, cfg("activity", "global_output_limit", 200));
+        if (item.stream === "error") {
+          activity.errors = appendOutputItem(activity.errors, item, cfg("activity", "recent_output_items", 12));
+        } else {
+          activity.output = appendOutputItem(activity.output, item, cfg("activity", "recent_output_items", 12));
+        }
+        activity.full_output = appendOutputItem(activity.full_output, item, cfg("activity", "full_stream_limit", 200));
+      } else if (isToolCallEvent(event.event_type || "")) {
+        const status = (event.event_type || "").startsWith("mcp_tool_call_")
+          ? (event.event_type || "").replace("mcp_tool_call_", "")
+          : (event.event_type || "").replace("tool_call_", "");
         activity.tools.push({
           event_id: event.event_id,
           timestamp: event.timestamp,
@@ -1400,10 +3306,10 @@ HTML = r"""<!doctype html>
           task_id: event.task_id,
           agent_id: event.actor_id,
           tool_name: event.payload?.tool_name,
-          status: (event.event_type || "").replace("mcp_tool_call_", ""),
+          status,
           target_agent_id: event.payload?.target_agent_id || event.payload?.to_agent_id || event.payload?.assigned_to || event.payload?.worker_id,
-          message: event.payload?.message || event.payload?.title || event.payload?.error || "",
-          result_id: event.payload?.task_id || event.payload?.report_id || event.payload?.event_id || "",
+          message: event.payload?.message || event.payload?.title || event.payload?.error || event.payload?.url || "",
+          result_id: event.payload?.task_id || event.payload?.report_id || event.payload?.human_report_id || event.payload?.event_id || "",
         });
         activity.tools = activity.tools.slice(-cfg("activity", "recent_tool_items", 12));
       } else if (ACTIVITY_EVENT_TYPES.has(event.event_type || "")) {
@@ -1423,6 +3329,24 @@ HTML = r"""<!doctype html>
       renderOutput();
       renderOrgChart();
       if (selectedAgentId === event.actor_id) renderAgentDetail();
+    }
+
+    function eventMatchesCurrentTaskFilter(event) {
+      if (!selectedTaskId) return true;
+      if (!currentTaskScope.size) return false;
+      if (event.task_id && currentTaskScope.has(event.task_id)) return true;
+      const payload = event.payload || {};
+      for (const key of ["task_id", "parent_task_id", "root_goal_id", "root_task_id", "final_task_id", "reviewed_task_id"]) {
+        if (payload[key] && currentTaskScope.has(String(payload[key]))) return true;
+      }
+      for (const key of ["task_ids", "current_task_ids"]) {
+        if (Array.isArray(payload[key]) && payload[key].some(value => currentTaskScope.has(String(value)))) return true;
+      }
+      return false;
+    }
+
+    function isToolCallEvent(eventType) {
+      return eventType.startsWith("mcp_tool_call_") || eventType.startsWith("tool_call_");
     }
 
     function findNodeById(agentId, nodes = orgChart) {
@@ -1447,7 +3371,10 @@ HTML = r"""<!doctype html>
       const node = findNodeById(selectedAgentId) || agents.find(agent => agent.id === selectedAgentId) || {id: selectedAgentId, name: selectedAgentId, role: "", status: ""};
       const activity = ensureAgentActivity(selectedAgentId, node.activity);
       const summary = summarizeActivity(activity, node);
+      const profile = node.personal_profile || {};
       const work = (node.current_task_ids || []).join(", ") || "-";
+      const modelLimits = renderModelLimit(node.model_capabilities);
+      const systemPrompt = node.system_prompt || "No system prompt stored for this agent.";
       drawer.setAttribute("aria-hidden", "false");
       backdrop.hidden = false;
       document.body.classList.add("detail-open");
@@ -1466,8 +3393,22 @@ HTML = r"""<!doctype html>
             <div class="agent-meta">tasks: ${esc(work)} - summary mode: ${esc(summary.mode || "local")}</div>
           </div>
           <div class="detail-section">
+            <h3>Personal Profile</h3>
+            <div class="activity-item">summary: ${esc(profile.summary || "No profile summary yet.")}</div>
+            <div class="activity-item">specialty tags: ${esc((profile.specialty_tags || []).join(", ") || "-")}</div>
+            <div class="activity-item">can do: ${esc((profile.can_do || []).slice(-6).join("; ") || "-")}</div>
+            <div class="activity-item">knows about: ${esc((profile.knows_about || []).slice(-6).join("; ") || "-")}</div>
+            <div class="activity-item">experiences: ${esc((profile.experiences || []).length || 0)} - revision ${esc(profile.revision || "-")}</div>
+          </div>
+          <div class="detail-section">
+            <h3>Model And Prompt</h3>
+            <div class="activity-item">model: ${esc(node.model || "runtime default")}</div>
+            <div class="activity-item">${esc(modelLimits)}</div>
+            <pre>${esc(systemPrompt)}</pre>
+          </div>
+          <div class="detail-section">
             <h3>Full Stream</h3>
-            <div class="stream-box">${(activity.full_output || activity.output || []).map(renderOutputItem).join("") || `<div class="muted output-line">No stream output.</div>`}</div>
+            <div class="stream-box">${aggregateOutputItems(activity.full_output || activity.output || []).map(renderOutputItem).join("") || `<div class="muted output-line">No stream output.</div>`}</div>
           </div>
           <div class="detail-section">
             <h3>Tool Calls</h3>
@@ -1490,18 +3431,32 @@ HTML = r"""<!doctype html>
         const item = JSON.parse(message.data);
         eventCursor = Math.max(eventCursor, item.sequence || 0);
         appendAgentEvent(item.event || {});
+        scheduleRefresh(250);
       });
       eventSource.addEventListener("heartbeat", (message) => {
         const item = JSON.parse(message.data);
         eventCursor = Math.max(eventCursor, item.cursor || 0);
+        if (longRfcDemoStatus?.running || realLlmBenchmarkStatus?.running || designedTaskStatus?.running) {
+          refreshDemoStatus().catch(err => console.error(err));
+        }
       });
       eventSource.onerror = () => {
         document.getElementById("stream-status").textContent = "reconnecting";
       };
     }
 
+    function scheduleRefresh(delay = 250) {
+      if (refreshScheduled) return;
+      refreshScheduled = true;
+      window.setTimeout(() => {
+        refreshScheduled = false;
+        refresh().catch(err => console.error(err));
+      }, delay);
+    }
+
     async function refresh() {
-      const res = await fetch("/api/state", { cache: "no-store" });
+      const stateUrl = selectedTaskId ? `/api/state?task_id=${encodeURIComponent(selectedTaskId)}` : "/api/state";
+      const res = await fetch(stateUrl, { cache: "no-store" });
       const data = await res.json();
       dashboardConfig = deepMerge(DEFAULT_CONFIG, data.config || {});
       eventCursor = Math.max(eventCursor, data.cursor || 0);
@@ -1509,19 +3464,23 @@ HTML = r"""<!doctype html>
       orgChart = data.org_chart || [];
       agents = data.agents || [];
       agentActivity = data.agent_activity || {};
+      currentTaskScope = new Set(data.task_filter?.task_ids || []);
+      renderTaskFilterOptions(data.all_tasks || data.tasks || []);
       document.getElementById("mission").textContent = `${data.company.name} - ${data.company.mission || "No mission"}`;
       document.getElementById("updated").textContent = new Date().toLocaleTimeString();
       const active = data.tasks.filter(t => ["assigned", "in_progress", "blocked"].includes(t.status)).length;
       const completed = data.tasks.filter(t => t.status === "completed").length;
       const failed = data.tasks.filter(t => t.status === "failed").length;
+      const traceLinks = (data.trace_files || []).slice(-2).map(file => renderFileLink(file.path, file.label || file.run_id || "trace")).join(" ") || "-";
       document.getElementById("metrics").innerHTML = [
         ["Agents", `${data.agents.length}${data.budget.headcount_limit ? " / " + data.budget.headcount_limit : ""}`],
         ["Active Tasks", active],
         ["Completed", completed],
         ["Failed", failed],
         ["Tokens", `${data.budget.tokens_used} / ${data.budget.token_budget_limit}`],
+        ["Trace Files", traceLinks],
         ["Output Events", liveOutput.length],
-      ].map(([label, value]) => `<div class="panel span-3"><h2>${esc(label)}</h2><div class="metric">${esc(value)}</div></div>`).join("");
+      ].map(([label, value]) => `<div class="panel span-3"><h2>${esc(label)}</h2><div class="metric">${value}</div></div>`).join("");
       document.getElementById("agents").innerHTML = rows(["Agent", "Role", "Status", "Model", "Current Work"], data.agents.map(a => [
         `<button data-action="agent-detail" data-agent-detail="${esc(a.id)}">${esc(a.name)}</button>`,
         esc(a.role),
@@ -1530,19 +3489,30 @@ HTML = r"""<!doctype html>
         esc((a.current_task_ids || []).join(", ") || "-")
       ]));
       renderOrgChart();
+      renderHumanReports(data.human_reports || []);
+      renderManagerReports(data.reports || []);
       document.getElementById("tasks").innerHTML = rows(["Task", "Title", "Status", "Assignee"], data.tasks.map(t => [
         esc(t.task_id),
         esc(t.title),
         `<span class="status ${statusClass(t.status)}">${esc(t.status)}</span>`,
         esc(t.assigned_to || "-")
       ]));
-      document.getElementById("runs").innerHTML = rows(["Run", "Task", "Agent", "Kind", "Status", "Runtime"], (data.agent_runs || data.worker_runs).map(r => [
+      document.getElementById("runs").innerHTML = rows(["Run", "Task", "Agent", "Kind", "Status", "Runtime", "Files"], (data.agent_runs || data.worker_runs).map(r => [
         esc(r.run_id),
         esc(r.task_id || "-"),
         esc(r.agent_id),
         esc(r.kind || "worker"),
         `<span class="status ${statusClass(r.status)}">${esc(r.status)}${r.returncode != null ? " " + esc(r.returncode) : ""}</span>`,
-        esc(r.executable || r.adapter || r.model || "-")
+        esc(r.executable || r.adapter || r.model || "-"),
+        [
+          r.prompt_path ? renderFileLink(r.prompt_path, "prompt") : "",
+          r.raw_response_path ? renderFileLink(r.raw_response_path, "raw") : "",
+          r.response_path ? renderFileLink(r.response_path, "response") : "",
+          r.error_path ? renderFileLink(r.error_path, "error") : "",
+          r.last_attempt_error_path ? renderFileLink(r.last_attempt_error_path, "attempt-error") : "",
+          r.stdout_path ? renderFileLink(r.stdout_path, "stdout") : "",
+          r.stderr_path ? renderFileLink(r.stderr_path, "stderr") : ""
+        ].filter(Boolean).join(" ") || "-"
       ]));
       document.getElementById("reports").innerHTML = rows(["Report", "From", "To", "Task", "Status", "Summary"], data.reports.map(r => [
         esc(r.report_id),
@@ -1558,6 +3528,22 @@ HTML = r"""<!doctype html>
       document.getElementById("replay").textContent = data.event_replay;
       document.getElementById("trajectories").textContent = data.trajectories;
       connectStream();
+    }
+
+    function renderTaskFilterOptions(tasks) {
+      const select = document.getElementById("task-filter-select");
+      if (!select) return;
+      const current = selectedTaskId;
+      select.innerHTML = `<option value="">All tasks</option>` + (tasks || []).map(task => {
+        const label = `${task.task_id} - ${task.title || ""}`.slice(0, 140);
+        return `<option value="${esc(task.task_id)}">${esc(label)}</option>`;
+      }).join("");
+      select.value = current;
+    }
+
+    function renderFileLink(path, label = "file") {
+      if (!path) return "-";
+      return `<a href="/api/file?path=${encodeURIComponent(path)}" target="_blank" rel="noreferrer">${esc(label)}</a>`;
     }
 
     document.addEventListener("click", (event) => {
@@ -1586,16 +3572,78 @@ HTML = r"""<!doctype html>
         }
         renderOrgChart();
       }
+      if (action === "set-dashboard-mode") {
+        dashboardMode = target.dataset.mode === "debug" ? "debug" : "simple";
+        localStorage.setItem("workforceDashboardMode", dashboardMode);
+        renderOrgChart();
+      }
       if (action === "start-long-rfc-demo") {
         startLongRfcDemo().catch(err => {
           longRfcDemoStatus = { status: "failed", running: false, error: String(err) };
           renderDemoStatus();
         });
       }
+      if (action === "start-real-llm-benchmark") {
+        startRealLlmBenchmark().catch(err => {
+          realLlmBenchmarkStatus = { status: "failed", running: false, error: String(err) };
+          renderDemoStatus();
+        });
+      }
+      if (action === "design-task-config") {
+        designTaskConfig().catch(err => {
+          designedTaskStatus = { status: "failed", running: false, error: String(err) };
+          finishDesignedProgress({
+            state: "failed",
+            phase: "model",
+            title: "Design failed.",
+            detail: String(err),
+          });
+          renderDemoStatus();
+        });
+      }
+      if (action === "start-designed-task") {
+        startDesignedTask().catch(err => {
+          designedTaskStatus = { status: "failed", running: false, error: String(err) };
+          finishDesignedProgress({
+            state: "failed",
+            phase: "request",
+            title: "Task run failed.",
+            detail: String(err),
+          });
+          renderDemoStatus();
+        });
+      }
+      if (action === "load-runtime-config") {
+        loadRuntimeConfig().catch(err => setRuntimeConfigStatus(String(err)));
+      }
+      if (action === "save-runtime-config") {
+        saveRuntimeConfig().catch(err => setRuntimeConfigStatus(String(err)));
+      }
+      if (action === "export-task-trace") {
+        exportSelectedTaskTrace().catch(err => setTraceExportStatus(esc(String(err))));
+      }
     });
 
+    document.addEventListener("change", (event) => {
+      if (event.target?.id === "task-filter-select") {
+        selectedTaskId = event.target.value || "";
+        selectedAgentId = null;
+        currentTaskScope = new Set();
+        refresh().catch(err => console.error(err));
+      }
+    });
+
+    document.addEventListener("input", (event) => {
+      if (event.target?.id === "designed-task-config-json") {
+        renderDraftOrganizationTree();
+      }
+    });
+
+    renderDraftOrganizationTree();
+    renderModeControls();
+    renderDesignedProgress();
+    loadRuntimeConfig().catch(err => setRuntimeConfigStatus(String(err)));
     refresh().catch(err => console.error(err));
-    setInterval(() => refresh().catch(err => console.error(err)), cfg("dashboard", "refresh_interval_ms", 5000));
   </script>
 </body>
 </html>

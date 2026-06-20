@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from workforce_runtime.core import Budget
+from workforce_runtime.core import Budget, ReportContract
 from workforce_runtime.server.runtime import WorkforceRuntime
 
 
@@ -35,6 +35,8 @@ def test_org_loader_generates_role_specific_system_prompts(tmp_path: Path) -> No
     assert hr is not None
     assert worker is not None
     assert "CEO guidance" in ceo.system_prompt
+    assert "report_to_human" in ceo.permissions
+    assert "Use report_to_human()" in ceo.system_prompt
     assert "Model context window: unknown" in ceo.system_prompt
     assert "HR guidance" in hr.system_prompt
     assert "Worker guidance" in worker.system_prompt
@@ -59,7 +61,15 @@ def test_mcp_assign_discuss_and_report_to_direct_manager(tmp_path: Path) -> None
     try:
         tools = send_request(process, {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
         tool_names = {tool["name"] for tool in tools["result"]["tools"]}
-        assert {"assign", "check_progress", "discuss", "hire", "update_system_prompt"} <= tool_names
+        assert {
+            "assign",
+            "check_progress",
+            "discuss",
+            "hire",
+            "update_system_prompt",
+            "update_agent_profile",
+            "get_agent_profiles",
+        } <= tool_names
 
         assigned = send_request(
             process,
@@ -79,7 +89,8 @@ def test_mcp_assign_discuss_and_report_to_direct_manager(tmp_path: Path) -> None
                 },
             },
         )
-        assert assigned["result"]["structuredContent"]["task_id"] == "task_001"
+        assigned_task_id = assigned["result"]["structuredContent"]["task_id"]
+        assert assigned_task_id.startswith("task_001_fix_parser_")
 
         discussed = send_request(
             process,
@@ -92,7 +103,7 @@ def test_mcp_assign_discuss_and_report_to_direct_manager(tmp_path: Path) -> None
                     "arguments": {
                         "from_agent_id": "codex_worker",
                         "to_agent_id": "claude_worker",
-                        "task_id": "task_001",
+                        "task_id": assigned_task_id,
                         "message": "Can you sanity-check the parser edge cases?",
                     },
                 },
@@ -111,14 +122,14 @@ def test_mcp_assign_discuss_and_report_to_direct_manager(tmp_path: Path) -> None
                     "arguments": {
                         "from_agent_id": "engineering_manager",
                         "target_agent_id": "codex_worker",
-                        "task_id": "task_001",
+                        "task_id": assigned_task_id,
                         "message": "Show current task status.",
                     },
                 },
             },
         )
         assert checked["result"]["structuredContent"]["ok"] is True
-        assert checked["result"]["structuredContent"]["active_tasks"][0]["task_id"] == "task_001"
+        assert checked["result"]["structuredContent"]["active_tasks"][0]["task_id"] == assigned_task_id
 
         reported = send_request(
             process,
@@ -130,7 +141,7 @@ def test_mcp_assign_discuss_and_report_to_direct_manager(tmp_path: Path) -> None
                     "name": "report",
                     "arguments": {
                         "from_agent_id": "codex_worker",
-                        "task_id": "task_001",
+                        "task_id": assigned_task_id,
                         "summary": "Parser fixed.",
                         "status": "completed",
                         "confidence": 0.9,
@@ -145,8 +156,8 @@ def test_mcp_assign_discuss_and_report_to_direct_manager(tmp_path: Path) -> None
         process.wait(timeout=5)
 
     with WorkforceRuntime(db_path) as runtime:
-        task = runtime.require_task("task_001")
-        report = runtime.store.list_reports_by_task("task_001")[0]
+        task = runtime.require_task(assigned_task_id)
+        report = runtime.store.list_reports_by_task(assigned_task_id)[0]
         discussion = next(event for event in runtime.store.list_events() if event.event_type == "discussion_message")
         event_types = [event.event_type for event in runtime.store.list_events()]
 
@@ -228,3 +239,46 @@ def test_manager_can_update_subordinate_system_prompt(tmp_path: Path) -> None:
                 target_agent_id="codex_worker",
                 system_prompt="Bad prompt edit.",
             )
+
+
+def test_agent_personal_profile_tools_and_report_memory(tmp_path: Path) -> None:
+    with WorkforceRuntime(tmp_path / "runtime.sqlite") as runtime:
+        runtime.initialize_org(EXAMPLE_ORG)
+        profile = runtime.update_agent_personal_profile(
+            actor_id="codex_worker",
+            agent_id="codex_worker",
+            summary="Specializes in parser fixes.",
+            knows_about=["parser edge cases"],
+            can_do=["run pytest"],
+            specialty_tags=["parser", "pytest"],
+            preferred_tools=["pytest"],
+        )
+        assert profile.summary == "Specializes in parser fixes."
+        assert "parser" in profile.specialty_tags
+
+        visible = runtime.list_visible_agent_personal_profiles(actor_id="engineering_manager")
+        assert "codex_worker" in {item.agent_id for item in visible}
+
+        task = runtime.create_task(
+            title="Fix parser regression",
+            objective="Patch parser and verify tests.",
+            assign_to="codex_worker",
+            assigned_by="engineering_manager",
+        )
+        runtime.register_report(
+            ReportContract(
+                report_id="report_profile_memory",
+                from_agent_id="codex_worker",
+                to_agent_id="engineering_manager",
+                task_id=task.task_id,
+                summary="Fixed parser regression and verified pytest.",
+                status="completed",
+                confidence=0.9,
+                work_done=["patched parser", "ran pytest"],
+            )
+        )
+
+    with WorkforceRuntime(tmp_path / "runtime.sqlite") as runtime:
+        updated = runtime.get_agent_personal_profile(actor_id="codex_worker", agent_id="codex_worker")
+        assert any(experience.task_id == task.task_id for experience in updated.experiences)
+        assert "pytest" in updated.specialty_tags or "parser" in updated.specialty_tags

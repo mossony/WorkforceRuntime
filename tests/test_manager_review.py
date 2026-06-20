@@ -49,7 +49,7 @@ def test_register_report_creates_manager_review_task_and_accepts(tmp_path: Path)
         review_tasks = [candidate for candidate in tasks if candidate.parent_task_id == task.task_id]
         assert len(review_tasks) == 1
         assert review_tasks[0].assigned_to == "engineering_manager"
-        assert review_tasks[0].context_refs == ["report:report_001", "task:task_001"]
+        assert review_tasks[0].context_refs == ["report:report_001", f"task:{task.task_id}"]
         assert review_tasks[0].status == "completed"
         assert runtime.require_task(task.task_id).status == "completed"
         event_types = [event.event_type for event in runtime.store.list_events()]
@@ -106,5 +106,5 @@ def test_review_report_cli_end_to_end(tmp_path: Path) -> None:
     )
 
     payload = json.loads(result.stdout)
-    assert payload["task_id"] == "task_001"
+    assert payload["task_id"] == task.task_id
     assert payload["status"] == "completed"

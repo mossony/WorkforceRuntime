@@ -11,6 +11,7 @@ from workforce_runtime.core import (
     Event,
     ReportContract,
     TaskContract,
+    TaskTraceExport,
     UsageCost,
 )
 from workforce_runtime.storage import FileStore, SQLiteStore
@@ -107,6 +108,16 @@ def test_sqlite_store_saves_and_loads_agent_task_report_event_and_artifact(tmp_p
         )
         store.save_artifact(artifact)
         assert store.list_artifacts_by_task("task_001") == [artifact]
+
+        trace = TaskTraceExport(
+            trace_id="tasktrace_task_001",
+            task_id="task_001",
+            path="task_traces/task_001.trace.json",
+            payload={"task_id": "task_001", "events": [event.model_dump(mode="json")]},
+        )
+        store.save_task_trace_export(trace)
+        assert store.get_task_trace_export("tasktrace_task_001") == trace
+        assert store.list_task_trace_exports_by_task("task_001") == [trace]
 
 
 def test_sqlite_events_are_append_only(tmp_path) -> None:

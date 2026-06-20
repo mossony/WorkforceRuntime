@@ -71,11 +71,12 @@ def test_generic_cli_worker_spawns_mock_worker_and_records_report(tmp_path: Path
         assert "Agent Runs:" in dashboard
         assert "Live Agent Output:" in dashboard
         assert "Completed Tasks:" in dashboard
-        assert "task_001  No-tools design summary  completed  Codex Worker" in dashboard
-        assert "report_registered task_001 by codex_worker" in dashboard
-        assert "worker_output" in [event.event_type for event in runtime.store.list_events()]
-        assert "worker_run_started" in [event.event_type for event in runtime.store.list_events()]
-        assert "worker_run_finished" in [event.event_type for event in runtime.store.list_events()]
+        assert f"{task.task_id}  No-tools design summary  completed  Codex Worker" in dashboard
+        events = runtime.store.list_events()
+        assert any(event.event_type == "report_registered" and event.task_id == task.task_id for event in events)
+        assert "worker_output" in [event.event_type for event in events]
+        assert "worker_run_started" in [event.event_type for event in events]
+        assert "worker_run_finished" in [event.event_type for event in events]
 
 
 def test_dashboard_cli_shows_completed_mock_worker_task(tmp_path: Path) -> None:
@@ -109,4 +110,4 @@ def test_dashboard_cli_shows_completed_mock_worker_task(tmp_path: Path) -> None:
     )
     assert "Workforce Runtime" in result.stdout
     assert "Completed Tasks:" in result.stdout
-    assert "task_001  Tool task  completed  Codex Worker" in result.stdout
+    assert "Tool task  completed  Codex Worker" in result.stdout

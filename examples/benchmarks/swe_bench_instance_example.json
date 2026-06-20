@@ -1,0 +1,15 @@
+{
+  "instance_id": "example__parser_bool",
+  "repo": "local/example-parser",
+  "base_commit": "not-applicable",
+  "problem_statement": "The parser incorrectly treats any non-empty string as true. Fix parse_bool so it accepts true/false values case-insensitively and rejects unknown values.",
+  "test_command": "pytest -q",
+  "fail_to_pass": [
+    "test_parser.py::test_parse_bool_rejects_unknown_values"
+  ],
+  "pass_to_pass": [
+    "test_parser.py::test_parse_bool_true",
+    "test_parser.py::test_parse_bool_false"
+  ],
+  "hints_text": "Normalize string inputs and explicitly map accepted boolean spellings."
+}

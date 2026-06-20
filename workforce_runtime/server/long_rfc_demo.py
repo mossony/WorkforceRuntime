@@ -9,6 +9,7 @@ from uuid import uuid4
 from workforce_runtime.core import ReportContract, UsageCost
 from workforce_runtime.mcp.server import MCPServer
 from workforce_runtime.server.runtime import WorkforceRuntime
+from workforce_runtime.server.tracing import write_trace_file
 from workforce_runtime.workers import GenericCLIWorker, RuntimeContext
 
 
@@ -216,6 +217,18 @@ def run_long_rfc_demo(
 
         reports = runtime.store.list_reports_by_task(str(worker_task["task_id"]))
         review_events = [event for event in runtime.store.list_events() if event.event_type == "manager_review_decided"]
+        trace_path = write_trace_file(
+            runtime,
+            workspace=workdir,
+            run_id=company_goal.task_id,
+            label="long-rfc",
+            task_id=str(worker_task["task_id"]),
+            metadata={
+                "root_task_id": company_goal.task_id,
+                "final_task_id": str(worker_task["task_id"]),
+                "demo": "long-rfc",
+            },
+        )
         runtime.record_event(
             event_type="demo_run_finished",
             actor_id="system",
@@ -226,6 +239,7 @@ def run_long_rfc_demo(
                 "worker_returncode": run.returncode,
                 "report_id": reports[-1].report_id if reports else "",
                 "review_decision": review_events[-1].payload.get("decision") if review_events else "",
+                "trace_path": str(trace_path),
             },
         )
         return {
@@ -237,6 +251,7 @@ def run_long_rfc_demo(
             "worker_returncode": run.returncode,
             "final_status": runtime.require_task(str(worker_task["task_id"])).status,
             "report_id": reports[-1].report_id if reports else "",
+            "trace_path": str(trace_path),
         }
 
 

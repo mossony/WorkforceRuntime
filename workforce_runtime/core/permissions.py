@@ -7,6 +7,7 @@ WRITE_BRANCH: Capability = "write_branch"
 RUN_TESTS: Capability = "run_tests"
 SUBMIT_ARTIFACT: Capability = "submit_artifact"
 REPORT: Capability = "report"
+REPORT_TO_HUMAN: Capability = "report_to_human"
 DELEGATE_TASK: Capability = "delegate_task"
 REQUEST_BUDGET: Capability = "request_budget"
 REQUEST_PERMISSION: Capability = "request_permission"
@@ -19,6 +20,7 @@ DEFAULT_CAPABILITIES: set[Capability] = {
     RUN_TESTS,
     SUBMIT_ARTIFACT,
     REPORT,
+    REPORT_TO_HUMAN,
     DELEGATE_TASK,
     REQUEST_BUDGET,
     REQUEST_PERMISSION,

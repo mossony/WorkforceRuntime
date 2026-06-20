@@ -39,6 +39,11 @@ DEFAULT_MODEL_REGISTRY: dict[str, Any] = {
 def load_model_registry(path: str | Path | None = None) -> dict[str, Any]:
     registry = copy.deepcopy(DEFAULT_MODEL_REGISTRY)
     if path is None:
+        runtime_config_path = Path("workforce_runtime_config.json")
+        if runtime_config_path.exists():
+            runtime_config = json.loads(runtime_config_path.read_text())
+            if isinstance(runtime_config, dict) and isinstance(runtime_config.get("models"), dict):
+                _deep_update(registry, {"models": runtime_config["models"]})
         return registry
 
     config_path = Path(path)
@@ -52,7 +57,7 @@ def load_model_registry(path: str | Path | None = None) -> dict[str, Any]:
 def model_capabilities(model: str, registry: dict[str, Any] | None = None) -> dict[str, Any] | None:
     if not model:
         return None
-    data = registry or DEFAULT_MODEL_REGISTRY
+    data = registry or load_model_registry()
     capabilities = data.get("models", {}).get(model)
     return copy.deepcopy(capabilities) if isinstance(capabilities, dict) else None
 

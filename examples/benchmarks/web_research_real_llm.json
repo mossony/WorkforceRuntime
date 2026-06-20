@@ -1,0 +1,27 @@
+{
+  "id": "web_research_real_llm",
+  "title": "Public Web Research Real LLM Smoke",
+  "goal": "Research the public IANA example domains page and produce a concise evidence-backed artifact that explains what the page is for.",
+  "source_urls": [
+    "https://www.iana.org/help/example-domains"
+  ],
+  "constraints": [
+    "Use only public source material from the provided URL.",
+    "Keep the final artifact concise.",
+    "Preserve source URL and fetch metadata."
+  ],
+  "acceptance_criteria": [
+    "The worker fetches the provided public URL.",
+    "The worker submits a markdown research artifact.",
+    "The worker reports findings, risks, confidence, and next action.",
+    "A manager review is recorded."
+  ],
+  "expected_artifacts": [
+    "benchmark_research_summary"
+  ],
+  "headcount_limit": 6,
+  "token_budget": 600000,
+  "management_model": "openai/gpt-oss-120b:free",
+  "worker_model": "poolside/laguna-xs.2:free",
+  "judge_model": "openai/gpt-oss-120b:free"
+}

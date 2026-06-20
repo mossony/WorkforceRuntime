@@ -48,7 +48,7 @@ def test_generic_worker_exceeding_runtime_budget_is_stopped_and_recorded(tmp_pat
 
         dashboard = render_text_dashboard(runtime.store)
         assert "Budget Overruns:" in dashboard
-        assert "task_001  codex_worker  worker exceeded runtime budget" in dashboard
+        assert f"{task.task_id}  codex_worker  worker exceeded runtime budget" in dashboard
 
 
 def test_report_usage_over_budget_records_violation(tmp_path: Path) -> None:

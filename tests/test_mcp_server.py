@@ -63,7 +63,11 @@ def test_mcp_server_report_tool_end_to_end(tmp_path: Path) -> None:
             process,
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         )
-        assert "report" in {tool["name"] for tool in tools["result"]["tools"]}
+        tool_names = {tool["name"] for tool in tools["result"]["tools"]}
+        assert "report" in tool_names
+        assert "report_to_human" in tool_names
+        assert "update_agent_profile" in tool_names
+        assert "get_agent_profiles" in tool_names
 
         org_context = send_request(
             process,
@@ -76,6 +80,41 @@ def test_mcp_server_report_tool_end_to_end(tmp_path: Path) -> None:
         )
         agent_context = org_context["result"]["structuredContent"]["agents"][0]
         assert "model_capabilities" in agent_context
+
+        updated_profile = send_request(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": 32,
+                "method": "tools/call",
+                "params": {
+                    "name": "update_agent_profile",
+                    "arguments": {
+                        "agent_id": "codex_worker",
+                        "summary": "Parser and pytest specialist.",
+                        "knows_about": ["parser failures"],
+                        "can_do": ["run pytest"],
+                        "specialty_tags": ["parser", "pytest"],
+                    },
+                },
+            },
+        )
+        assert updated_profile["result"]["structuredContent"]["profile"]["agent_id"] == "codex_worker"
+
+        profiles = send_request(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": 33,
+                "method": "tools/call",
+                "params": {
+                    "name": "get_agent_profiles",
+                    "arguments": {"agent_id": "engineering_manager"},
+                },
+            },
+        )
+        profile_ids = {profile["agent_id"] for profile in profiles["result"]["structuredContent"]["profiles"]}
+        assert "codex_worker" in profile_ids
 
         report = send_request(
             process,
@@ -110,6 +149,47 @@ def test_mcp_server_report_tool_end_to_end(tmp_path: Path) -> None:
         )
         assert report["result"]["structuredContent"]["ok"] is True
         report_id = report["result"]["structuredContent"]["report_id"]
+
+        human_report = send_request(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "report_to_human",
+                    "arguments": {
+                        "from_agent_id": "ceo",
+                        "task_id": "task_001",
+                        "title": "Final CEO report",
+                        "message": "The parser task is complete and ready for human review.",
+                        "status": "completed",
+                        "confidence": 0.91,
+                        "next_action": "Human can review the trace.",
+                    },
+                },
+            },
+        )
+        assert human_report["result"]["structuredContent"]["ok"] is True
+        assert human_report["result"]["structuredContent"]["human_report_id"].startswith("human_report_")
+
+        rejected = send_request(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
+                    "name": "report_to_human",
+                    "arguments": {
+                        "from_agent_id": "codex_worker",
+                        "task_id": "task_001",
+                        "message": "Worker should not be able to report directly to human.",
+                    },
+                },
+            },
+        )
+        assert "error" in rejected
     finally:
         assert process.stdin is not None
         process.stdin.close()
@@ -124,5 +204,6 @@ def test_mcp_server_report_tool_end_to_end(tmp_path: Path) -> None:
         assert reports[0].cost.tool_calls == 8
         event_types = [event.event_type for event in runtime.store.list_events()]
         assert "report_registered" in event_types
+        assert "human_report_registered" in event_types
         assert "mcp_tool_call_started" in event_types
         assert "mcp_tool_call_finished" in event_types

@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
-from workforce_runtime.config import format_model_context_note
+from workforce_runtime.config import format_model_context_note, load_runtime_config
 from workforce_runtime.core import Artifact, ReportContract, TaskContract, UsageCost
 from workforce_runtime.storage import FileStore
 from workforce_runtime.workers.base import RuntimeContext, WorkerRun
@@ -16,13 +16,18 @@ class CodexWorker:
     def __init__(
         self,
         *,
-        codex_executable: str = "codex",
-        profile: str = "workforce-openrouter",
+        codex_executable: str | None = None,
+        profile: str | None = None,
         timeout_seconds: int | None = None,
+        approval_policy: str | None = None,
+        sandbox_mode: str | None = None,
     ) -> None:
-        self.codex_executable = codex_executable
-        self.profile = profile
-        self.timeout_seconds = timeout_seconds
+        config = load_runtime_config().get("workers", {}).get("codex", {})
+        self.codex_executable = codex_executable or str(config.get("executable") or "codex")
+        self.profile = profile or str(config.get("profile") or "workforce-openrouter")
+        self.timeout_seconds = timeout_seconds if timeout_seconds is not None else config.get("timeout_seconds")
+        self.approval_policy = approval_policy or str(config.get("approval_policy") or "never")
+        self.sandbox_mode = sandbox_mode or str(config.get("sandbox_mode") or "workspace-write")
         self._runs: dict[str, WorkerRun] = {}
         self._usage: dict[str, dict[str, int]] = {}
 
@@ -32,7 +37,11 @@ class CodexWorker:
     def start_task(self, task: TaskContract, runtime_context: RuntimeContext) -> WorkerRun:
         run_id = f"run_{uuid4().hex[:12]}"
         file_store = FileStore(runtime_context.workspace)
-        task_dir = file_store.task_artifact_dir(task.task_id)
+        task_dir = file_store.agent_task_run_dir(
+            agent_id=runtime_context.agent_id,
+            task_id=task.task_id,
+            run_id=run_id,
+        )
         task_contract_path = task_dir / "task_contract.json"
         final_message_path = task_dir / "codex-final.md"
         task_contract_path.write_text(task.model_dump_json(indent=2))
@@ -49,9 +58,9 @@ class CodexWorker:
             "--profile",
             self.profile,
             "-a",
-            "never",
+            self.approval_policy,
             "-s",
-            "workspace-write",
+            self.sandbox_mode,
             "-C",
             str(runtime_context.workspace),
             "exec",
@@ -72,6 +81,7 @@ class CodexWorker:
             task_id=task.task_id,
             agent_id=runtime_context.agent_id,
             timeout_message="codex worker timed out",
+            run_dir=task_dir,
         )
         returncode = streamed.returncode
         stdout_path = streamed.stdout_path
@@ -152,7 +162,11 @@ class CodexWorker:
 
     def collect_artifacts(self, run_id: str) -> list[Path]:
         run = self._runs[run_id]
-        return sorted(run.stdout_path.parent.iterdir())
+        paths = list(run.stdout_path.parent.iterdir())
+        legacy_dir = FileStore(FileStore.workspace_from_run_file(run.stdout_path)).task_artifact_dir(run.task_id)
+        if legacy_dir.exists():
+            paths.extend(legacy_dir.iterdir())
+        return sorted(set(paths))
 
     def stop_task(self, run_id: str) -> None:
         if run_id not in self._runs:
@@ -177,7 +191,11 @@ Your assigned task is:
 You must work only within the given workspace.
 You must respect all constraints.
 
-When Workforce Runtime MCP tools are available, use them to report progress and submit artifacts.
+When Workforce Runtime MCP tools are available:
+- Use get_task_dossier() to fetch requirements, division of work, task documents, reports, artifacts, and recent events.
+- Use upsert_task_doc() to preserve new requirements, decisions, notes, risks, or division-of-work updates.
+- Use request_tool() when repeated missing capabilities make the task unnecessarily manual.
+- Use report() and submit_artifact() for completion evidence.
 
 When you finish, provide a concise final report with:
 - summary

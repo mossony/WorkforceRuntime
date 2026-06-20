@@ -23,7 +23,11 @@ class GenericCLIWorker:
     def start_task(self, task: TaskContract, runtime_context: RuntimeContext) -> WorkerRun:
         run_id = f"run_{uuid4().hex[:12]}"
         file_store = FileStore(runtime_context.workspace)
-        task_dir = file_store.task_artifact_dir(task.task_id)
+        task_dir = file_store.agent_task_run_dir(
+            agent_id=runtime_context.agent_id,
+            task_id=task.task_id,
+            run_id=run_id,
+        )
         task_contract_path = task_dir / "task_contract.json"
         task_contract_path.write_text(task.model_dump_json(indent=2))
 
@@ -50,6 +54,7 @@ class GenericCLIWorker:
                 "WORKFORCE_TASK_CONTRACT_PATH": str(task_contract_path),
                 "WORKFORCE_RUNTIME_DB": str(runtime_context.db_path),
                 "WORKFORCE_WORKSPACE": str(runtime_context.workspace),
+                "WORKFORCE_AGENT_RUN_DIR": str(task_dir),
                 "WORKFORCE_MCP_COMMAND": "python3 -m workforce_runtime mcp serve",
             }
         )
@@ -73,6 +78,7 @@ class GenericCLIWorker:
             task_id=task.task_id,
             agent_id=runtime_context.agent_id,
             timeout_message="worker timed out",
+            run_dir=task_dir,
         )
         returncode = streamed.returncode
         stdout_path = streamed.stdout_path
@@ -106,7 +112,11 @@ class GenericCLIWorker:
 
     def collect_artifacts(self, run_id: str) -> list[Path]:
         run = self._runs[run_id]
-        return sorted(run.stdout_path.parent.iterdir())
+        paths = list(run.stdout_path.parent.iterdir())
+        legacy_dir = FileStore(FileStore.workspace_from_run_file(run.stdout_path)).task_artifact_dir(run.task_id)
+        if legacy_dir.exists():
+            paths.extend(legacy_dir.iterdir())
+        return sorted(set(paths))
 
     def stop_task(self, run_id: str) -> None:
         if run_id not in self._runs:

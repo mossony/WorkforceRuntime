@@ -15,9 +15,10 @@ This public alpha README explains what Workforce Runtime is, what it is not, how
 Install the package in editable mode:
 
 ```bash
-python3 -m venv .venv
+python3 -m pip install --user uv  # only if uv is not already installed
+uv venv
 source .venv/bin/activate
-python3 -m pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
 Run the packaged mock-worker demo:
@@ -48,9 +49,28 @@ workforce-runtime --db .workforce_runtime/demo.sqlite dashboard --replay
 workforce-runtime --db .workforce_runtime/demo.sqlite dashboard --trajectories
 ```
 
+Copy the unified runtime config template when you want to adjust models,
+dashboard behavior, worker launch settings, benchmark defaults, or OpenRouter
+settings from one file:
+
+```bash
+cp examples/workforce_runtime_config.json workforce_runtime_config.json
+workforce-runtime --config workforce_runtime_config.json --db .workforce_runtime/demo.sqlite dashboard --serve
+```
+
 The parser demo creates a small git workspace, assigns a planning task to an engineering manager, delegates a parser bug fix to a worker, receives MCP reports and artifacts, runs manager review, and prints a text dashboard. The smaller status demo uses management agents routed to `openai/gpt-oss-120b:free` and a terminal worker routed to `poolside/laguna-xs.2:free` as local metadata, then prints dashboard snapshots, event replay, and per-agent trajectories. The web research demo uses real network access plus MCP `assign`, `check_progress`, `get_task_context`, `discuss`, `submit_artifact`, and `report` calls.
 
 Worker adapters stream stdout/stderr into runtime events while they run, and manager-style external executors can stream `agent_output` events. The web dashboard shows an org chart, per-agent output, per-agent MCP tool activity, agent run state, event replay, and trajectories. If the local Codex desktop app is installed, Codex workers use its app icon in the org chart.
+
+Design an organization from a short goal, or run a benchmark case with real OpenRouter calls:
+
+```bash
+workforce-runtime org design --goal "Research a public web source and produce an evidence-backed artifact" --use-llm
+workforce-runtime --db .workforce_runtime/benchmark.sqlite benchmark run \
+  --case examples/benchmarks/web_research_real_llm.json \
+  --workspace .workforce_runtime/benchmark/workspace \
+  --use-llm --judge heuristic
+```
 
 ## How It Differs From Ordinary Agent Frameworks
 
@@ -62,6 +82,8 @@ Most agent frameworks focus on the worker loop: prompting, tool choice, planning
 - `workforce_runtime/server/runtime.py` owns task assignment, reports, artifacts, reviews, budget checks, and permission checks.
 - `workforce_runtime/mcp/server.py` exposes worker-facing MCP tools.
 - `workforce_runtime/workers/` contains the generic CLI, Codex, and Claude Code adapters.
+- `workforce_runtime/org_designer.py` creates a small organization from a goal with an optional OpenRouter LLM pass.
+- `workforce_runtime/evals/benchmark.py` runs JSON benchmark cases and scores task completion, artifacts, communication efficiency, and org design.
 - `workforce_runtime/dashboard/text_dashboard.py` renders the local text dashboard.
 
 ## Defining An Org Chart
@@ -74,6 +96,18 @@ Initialize a runtime database:
 workforce-runtime --db .workforce_runtime/runtime.sqlite init --org examples/simple_engineering_org/org.yaml
 workforce-runtime --db .workforce_runtime/runtime.sqlite org print examples/simple_engineering_org/org.yaml
 ```
+
+Generate a new org from a short goal:
+
+```bash
+workforce-runtime org design \
+  --goal "Research a public RFC and produce an evidence-backed summary" \
+  --headcount-limit 6 \
+  --use-llm \
+  --out .workforce_runtime/designed_org.yaml
+```
+
+The dashboard also has a `Start Real LLM Benchmark` button that runs `examples/benchmarks/web_research_real_llm.json` against the current dashboard database.
 
 ## Adding A Worker Adapter
 
@@ -354,7 +388,8 @@ The initial system should run as a local or hosted service.
 Example:
 
 ```bash
-workforce-runtime server --config org.yaml
+workforce-runtime --config workforce_runtime_config.json --db .workforce_runtime/runtime.sqlite init --org examples/simple_engineering_org/org.yaml
+workforce-runtime --config workforce_runtime_config.json --db .workforce_runtime/runtime.sqlite dashboard --serve
 ```
 
 The server owns:

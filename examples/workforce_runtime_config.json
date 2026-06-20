@@ -1,0 +1,164 @@
+{
+  "runtime": {
+    "db_path": ".workforce_runtime/runtime.sqlite",
+    "workspace_root": ".workforce_runtime",
+    "task_trace_dir": "",
+    "task_trace_include_file_contents": true,
+    "task_trace_max_file_bytes": 500000
+  },
+  "openrouter": {
+    "chat_completions_url": "https://openrouter.ai/api/v1/chat/completions",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "timeout_seconds": 90,
+    "reasoning_enabled": true,
+    "stream": false,
+    "http_referer": "https://github.com/openai/workforce-runtime",
+    "x_title": "Workforce Runtime"
+  },
+  "models": {
+    "openai/gpt-oss-120b:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 131072,
+      "max_output_tokens": 131072,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "source": "https://openrouter.ai/openai/gpt-oss-120b:free"
+    },
+    "poolside/laguna-m.1:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 262144,
+      "max_output_tokens": 32768,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "source": "https://openrouter.ai/poolside/laguna-m.1:free"
+    },
+    "poolside/laguna-xs.2:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 262144,
+      "max_output_tokens": 32768,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "source": "https://openrouter.ai/poolside/laguna-xs.2:free"
+    }
+  },
+  "org_designer": {
+    "company_name": "Designed Workforce",
+    "headcount_limit": 6,
+    "token_budget": 600000,
+    "management_model": "openai/gpt-oss-120b:free",
+    "worker_model": "poolside/laguna-xs.2:free",
+    "include_hr": true,
+    "max_management_depth": 3,
+    "use_llm": false
+  },
+  "designed_task": {
+    "company_name": "Designed Task Workforce",
+    "headcount_limit": 6,
+    "token_budget": 600000,
+    "management_model": "openai/gpt-oss-120b:free",
+    "worker_model": "poolside/laguna-m.1:free",
+    "judge_model": "openai/gpt-oss-120b:free",
+    "use_llm": true,
+    "judge": "heuristic",
+    "reset": false,
+    "constraints": ["Preserve the user's stated objective."],
+    "acceptance_criteria": [
+      "Produce a concise result artifact.",
+      "Report evidence, risks, and next action."
+    ],
+    "expected_artifacts": ["task_result"]
+  },
+  "dashboard": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "refresh_interval_ms": 5000,
+    "max_visible_agents": 80,
+    "collapse_depth": 3,
+    "show_idle_activity": true
+  },
+  "activity": {
+    "recent_event_limit": 300,
+    "event_scan_limit": 1200,
+    "recent_output_items": 12,
+    "recent_tool_items": 12,
+    "recent_event_items": 10,
+    "full_stream_limit": 200,
+    "global_output_limit": 200,
+    "worker_output_limit": 80
+  },
+  "summaries": {
+    "mode": "local",
+    "max_chars": 140,
+    "active_window_seconds": 120,
+    "llm": {
+      "provider": "openrouter",
+      "base_url": "https://openrouter.ai/api/v1/chat/completions",
+      "model": "openai/gpt-oss-120b:free",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "reasoning_enabled": true,
+      "stream": false
+    }
+  },
+  "icons": {
+    "codex": {"label": "Codex", "image_url": "/assets/agent-icons/codex.png"},
+    "claude": {"label": "Claude", "image_url": ""},
+    "poolside": {"label": "Pool", "image_url": ""},
+    "manager": {"label": "Mgr", "image_url": ""},
+    "executive": {"label": "CEO", "image_url": ""},
+    "generic": {"label": "AI", "image_url": ""}
+  },
+  "workers": {
+    "codex": {
+      "executable": "codex",
+      "profile": "workforce-openrouter",
+      "approval_policy": "never",
+      "sandbox_mode": "workspace-write",
+      "timeout_seconds": null
+    },
+    "claude_code": {
+      "executable": "claude",
+      "timeout_seconds": null
+    },
+    "generic_cli": {
+      "default_timeout_seconds": null
+    }
+  },
+  "demos": {
+    "sample_repo_fix_workspace": ".workforce_runtime/demo/sample-repo-fix",
+    "long_rfc": {
+      "url": "https://www.rfc-editor.org/rfc/rfc9110.txt",
+      "delay_seconds": 0.8,
+      "worker_timeout_seconds": 90
+    },
+    "web_research": {
+      "worker_timeout_seconds": 60
+    },
+    "simple_status": {
+      "worker_timeout_seconds": 30
+    }
+  },
+  "benchmarks": {
+    "default_case_path": "examples/benchmarks/web_research_real_llm.json",
+    "workspace": ".workforce_runtime/benchmark/workspace",
+    "use_llm": false,
+    "judge": "heuristic",
+    "reset": true,
+    "source_excerpt_chars": 20000,
+    "llm_json": {
+      "max_retries": 2,
+      "max_tokens": 4000,
+      "reasoning_enabled": false,
+      "stream": false,
+      "retry_initial_delay_seconds": 0.25,
+      "retry_backoff_multiplier": 2.0,
+      "retry_max_delay_seconds": 2.0
+    },
+    "swe_bench": {
+      "dataset": "SWE-bench/SWE-bench_Lite",
+      "model": "poolside/laguna-m.1:free",
+      "max_tokens": 6000,
+      "test_timeout_seconds": 600,
+      "setup_timeout_seconds": 900
+    }
+  }
+}

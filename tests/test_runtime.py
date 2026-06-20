@@ -26,12 +26,12 @@ def test_runtime_initializes_org_and_creates_task(tmp_path: Path) -> None:
             assign_to="codex_worker",
         )
 
-        assert task.task_id == "task_001"
+        assert task.task_id.startswith("task_001_fix_failing_parser_test_")
         assert task.status == "assigned"
-        assert runtime.require_task("task_001") == task
+        assert runtime.require_task(task.task_id) == task
         assigned_agent = runtime.get_agent("codex_worker")
         assert assigned_agent.status == "busy"
-        assert assigned_agent.current_task_ids == ["task_001"]
+        assert assigned_agent.current_task_ids == [task.task_id]
 
         events = runtime.store.list_events()
         assert [event.event_type for event in events] == [
@@ -133,6 +133,95 @@ def test_runtime_records_streaming_agent_output(tmp_path: Path) -> None:
     assert "agent_run_finished" in event_types
 
 
+def test_runtime_exports_complete_task_trace_snapshot(tmp_path: Path) -> None:
+    db_path = tmp_path / "runtime.sqlite"
+    artifact_path = tmp_path / "design.md"
+    artifact_path.write_text("# Design\n\nTrace this file.")
+
+    with WorkforceRuntime(db_path) as runtime:
+        runtime.initialize_org(EXAMPLE_ORG)
+        task = runtime.create_task(
+            title="Produce design note",
+            objective="Write a short design note and report evidence.",
+            assign_to="codex_worker",
+        )
+        runtime.record_agent_run_started(
+            run_id="codex_run_001",
+            task_id=task.task_id,
+            actor_id="codex_worker",
+            adapter="codex",
+            model="poolside/laguna-m.1:free",
+        )
+        runtime.record_agent_output(
+            run_id="codex_run_001",
+            task_id=task.task_id,
+            actor_id="codex_worker",
+            stream="assistant",
+            text="Writing the design note.",
+        )
+        runtime.record_agent_run_finished(
+            run_id="codex_run_001",
+            task_id=task.task_id,
+            actor_id="codex_worker",
+            status="completed",
+            usage={"total_tokens": 42},
+        )
+        runtime.upsert_task_document(
+            actor_id="codex_worker",
+            task_id=task.task_id,
+            title="Requirements",
+            doc_type="requirements",
+            content="Write a short note and include evidence.",
+        )
+        runtime.register_artifact(
+            Artifact(
+                artifact_id="artifact_001",
+                task_id=task.task_id,
+                agent_id="codex_worker",
+                type="design_doc",
+                path=str(artifact_path),
+            )
+        )
+        runtime.register_report(
+            ReportContract(
+                report_id="report_001",
+                from_agent_id="codex_worker",
+                to_agent_id="engineering_manager",
+                task_id=task.task_id,
+                summary="Completed the design note.",
+                status="completed",
+                work_done=["Wrote the note"],
+                evidence=[{"type": "design_doc", "path": str(artifact_path)}],
+                risks=[],
+                blockers=[],
+                confidence=0.9,
+                cost=UsageCost(tokens_used=42, runtime_seconds=2, tool_calls=1),
+                next_action="Ready for review.",
+                requires_decision=False,
+                alignment_check="Aligned with objective.",
+            )
+        )
+
+        trace = runtime.export_task_trace(task.task_id, workspace=tmp_path / "manual_traces")
+        stored = runtime.store.get_task_trace_export(trace.trace_id)
+        exports = runtime.store.list_task_trace_exports_by_task(task.task_id)
+
+    assert stored == trace
+    assert exports[-1].trace_id == trace.trace_id
+    assert Path(trace.path).exists()
+    written = json.loads(Path(trace.path).read_text())
+    payload = written["payload"]
+    assert payload["task_id"] == task.task_id
+    assert task.task_id in payload["scope"]["task_ids"]
+    assert any(item["task_id"] != task.task_id for item in payload["tasks"])
+    assert any(event["event_type"] == "agent_output" for event in payload["events"])
+    assert any(run["run_id"] == "codex_run_001" and run["usage"]["total_tokens"] == 42 for run in payload["agent_runs"])
+    assert payload["documents"][0]["doc_type"] == "requirements"
+    assert payload["reports"][0]["report_id"] == "report_001"
+    assert payload["artifacts"][0]["path"] == str(artifact_path)
+    assert any(file["path"] == str(artifact_path) and "Trace this file." in file["content"] for file in payload["files"])
+
+
 def test_runtime_rejects_unknown_assignee(tmp_path: Path) -> None:
     with WorkforceRuntime(tmp_path / "runtime.sqlite") as runtime:
         runtime.initialize_org(EXAMPLE_ORG)
@@ -186,8 +275,9 @@ def test_task_cli_end_to_end(tmp_path: Path) -> None:
         text=True,
     )
     task_payload = json.loads(create.stdout)
-    assert task_payload["task_id"] == "task_001"
+    assert task_payload["task_id"].startswith("task_001_fix_failing_test_")
     assert task_payload["status"] == "assigned"
+    task_id = task_payload["task_id"]
 
     task_list = subprocess.run(
         [sys.executable, "-m", "workforce_runtime", "--db", str(db_path), "task", "list"],
@@ -195,7 +285,7 @@ def test_task_cli_end_to_end(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
     )
-    assert "task_001\tassigned\tcodex_worker\tFix failing test" in task_list.stdout
+    assert f"{task_id}\tassigned\tcodex_worker\tFix failing test" in task_list.stdout
 
     task_show = subprocess.run(
         [
@@ -206,7 +296,7 @@ def test_task_cli_end_to_end(tmp_path: Path) -> None:
             str(db_path),
             "task",
             "show",
-            "task_001",
+            task_id,
         ],
         check=True,
         capture_output=True,
