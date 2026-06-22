@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from workforce_runtime.dashboard import render_agent_trajectories, render_event_replay, render_text_dashboard
+from workforce_runtime.dashboard.v2_dashboard import render_v2_shadow_dashboard
 from workforce_runtime.dashboard.web_dashboard import add_web_dashboard_args, serve_web_dashboard
 from workforce_runtime.config import load_runtime_config
 from workforce_runtime.evals import (
@@ -138,6 +139,27 @@ def build_parser() -> argparse.ArgumentParser:
     swe_run.add_argument("--max-tokens", type=int, default=None, help="Maximum output tokens for each candidate patch request")
     swe_run.add_argument("--test-timeout", type=int, default=None, help="Per-instance pytest timeout in seconds")
     swe_run.add_argument("--setup-timeout", type=int, default=None, help="Per-command setup timeout in seconds")
+
+    v2_parser = subparsers.add_parser("v2", help="V2 organizational control-plane commands")
+    v2_subparsers = v2_parser.add_subparsers(dest="v2_command")
+    v2_demo = v2_subparsers.add_parser("demo", help="Run the V2 shadow-governance end-to-end demo")
+    v2_demo.add_argument("--github-events", type=Path, default=None, help="Optional GitHub event fixture JSON")
+    v2_demo.add_argument("--out", type=Path, default=None, help="Optional output JSON path")
+    v2_analyze = v2_subparsers.add_parser("analyze-v1-run", help="Analyze a completed V1 runtime run with V2 governance")
+    v2_analyze.add_argument("--task-id", default=None, help="Optional root V1 task id to analyze")
+    v2_analyze.add_argument("--v2-db", type=Path, default=None, help="Optional separate SQLite DB for V2 analysis objects")
+    v2_analyze.add_argument("--export-dir", type=Path, default=None, help="Directory for V2 analysis artifacts")
+    v2_analyze.add_argument("--json", action="store_true", help="Print the full analysis JSON")
+    v2_sympy = v2_subparsers.add_parser("sympy-20590", help="Prepare or run the V2 SymPy SWE-bench 20590 case")
+    v2_sympy.add_argument("--experiment-dir", type=Path, default=Path.home() / "workforce-tests" / "sympy-20590")
+    v2_sympy.add_argument("--prepare-only", action="store_true", help="Only download instance and materialize repo workspace")
+    v2_sympy.add_argument("--runtime-db", type=Path, default=None, help="Optional V1 runtime DB path")
+    v2_sympy.add_argument("--worker-timeout", type=int, default=None, help="Optional Codex worker timeout in seconds")
+    v2_sympy.add_argument("--codex-model", default="openai/gpt-oss-120b:free", help="Override Codex model for the implementer")
+    v2_sympy.add_argument("--codex-sandbox-mode", default=None, help="Override Codex sandbox mode, e.g. workspace-write or danger-full-access")
+    v2_sympy.add_argument("--codex-profile", default=None, help="Override Codex profile")
+    v2_sympy.add_argument("--no-reset-workspace", action="store_true", help="Do not reset repo to workforce-test-base before running")
+    v2_sympy.add_argument("--out", type=Path, default=None, help="Optional result JSON path")
 
     return parser
 
@@ -356,6 +378,77 @@ def main(argv: list[str] | None = None) -> None:
                 indent=2,
             )
         )
+        return
+
+    if args.command == "v2" and args.v2_command == "demo":
+        from workforce_runtime.v2.pipeline import run_v2_shadow_demo
+
+        result = run_v2_shadow_demo(db_path=args.db, github_events_path=args.github_events)
+        if args.out is not None:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(json.dumps(result.model_dump(mode="json"), indent=2))
+        print(render_v2_shadow_dashboard(result))
+        return
+
+    if args.command == "v2" and args.v2_command == "analyze-v1-run":
+        from workforce_runtime.v2.v1_bridge import analyze_v1_runtime
+
+        result = analyze_v1_runtime(
+            v1_db_path=args.db,
+            task_id=args.task_id,
+            v2_db_path=args.v2_db,
+            export_dir=args.export_dir,
+        )
+        if args.json:
+            print(result.model_dump_json(indent=2))
+        else:
+            print("V2 analysis of V1 run")
+            print(f"- organization: {result.organization_id}")
+            print(f"- task: {result.task_id or 'all'}")
+            print(f"- analyzed tasks: {len(result.analyzed_task_ids)}")
+            print(f"- normalized events: {len(result.normalized_events)}")
+            print(f"- work edges: {len(result.work_graph.edges)}")
+            print(f"- findings: {len(result.findings)}")
+            print(f"- proposals: {len(result.proposals)}")
+            print("Recommendations:")
+            for item in result.recommendations or ["No recommendation generated."]:
+                print(f"- {item}")
+            if args.export_dir is not None:
+                print(f"Artifacts: {args.export_dir}")
+        return
+
+    if args.command == "v2" and args.v2_command == "sympy-20590":
+        from workforce_runtime.v2.sympy_benchmark import prepare_sympy_20590_case, run_sympy_20590_fixed_org_with_v2_review
+
+        if args.prepare_only:
+            preparation = prepare_sympy_20590_case(experiment_dir=args.experiment_dir)
+            print(preparation.model_dump_json(indent=2))
+            return
+        result = run_sympy_20590_fixed_org_with_v2_review(
+            experiment_dir=args.experiment_dir,
+            runtime_db_path=args.runtime_db,
+            worker_timeout_seconds=args.worker_timeout,
+            codex_model=args.codex_model,
+            codex_sandbox_mode=args.codex_sandbox_mode,
+            codex_profile=args.codex_profile,
+            reset_workspace=not args.no_reset_workspace,
+        )
+        if args.out is not None:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(result.model_dump_json(indent=2))
+        print("V2 SymPy 20590 fixed-org run")
+        print(f"- experiment_dir: {result.preparation.experiment_dir}")
+        print(f"- task_id: {result.task_id}")
+        print(f"- worker_returncode: {result.worker_returncode}")
+        print(f"- patch: {result.patch_path} nonempty={result.patch_nonempty}")
+        print(f"- prediction: {result.prediction_path or 'not written'}")
+        print(f"- V2 analysis: {result.analysis_export_dir}")
+        print(f"- findings: {len(result.v2_analysis.findings)}")
+        print("Recommendations:")
+        for item in result.v2_analysis.recommendations or ["No recommendation generated."]:
+            print(f"- {item}")
+        for warning in result.warnings:
+            print(f"WARNING: {warning}")
         return
 
     print("Workforce Runtime: organization runtime skeleton is ready.")

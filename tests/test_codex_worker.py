@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -30,6 +31,7 @@ for index, arg in enumerate(args):
     if arg == "--output-last-message":
         final_path = Path(args[index + 1])
 
+(workspace / "codex-args.json").write_text(json.dumps(args))
 (workspace / "README.md").write_text("# Sample\\n\\nUpdated by fake Codex.\\n")
 if final_path is not None:
     final_path.write_text("Fake Codex completed the task.")
@@ -66,7 +68,12 @@ def test_codex_worker_captures_outputs_diff_report_and_usage(tmp_path: Path) -> 
             objective="Update the README and report what changed.",
             assign_to="codex_worker",
         )
-        worker = CodexWorker(codex_executable=str(fake_codex), profile="test", timeout_seconds=10)
+        worker = CodexWorker(
+            codex_executable=str(fake_codex),
+            profile="test",
+            model="openai/gpt-oss-120b:free",
+            timeout_seconds=10,
+        )
         run = worker.start_task(
             task,
             RuntimeContext(
@@ -79,6 +86,8 @@ def test_codex_worker_captures_outputs_diff_report_and_usage(tmp_path: Path) -> 
         )
 
         assert run.returncode == 0
+        codex_args = json.loads((workspace / "codex-args.json").read_text())
+        assert codex_args[:4] == ["--profile", "test", "-m", "openai/gpt-oss-120b:free"]
         artifact_names = {path.name for path in worker.collect_artifacts(run.run_id)}
         assert {"task_contract.json", "stdout.log", "stderr.log", "codex-final.md", "diff.patch"} <= artifact_names
         assert worker.get_usage(run.run_id) == {

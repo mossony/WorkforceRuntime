@@ -98,6 +98,7 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
         "codex": {
             "executable": "codex",
             "profile": "workforce-openrouter",
+            "model": None,
             "approval_policy": "never",
             "sandbox_mode": "workspace-write",
             "timeout_seconds": None,

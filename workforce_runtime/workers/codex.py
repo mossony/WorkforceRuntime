@@ -18,6 +18,7 @@ class CodexWorker:
         *,
         codex_executable: str | None = None,
         profile: str | None = None,
+        model: str | None = None,
         timeout_seconds: int | None = None,
         approval_policy: str | None = None,
         sandbox_mode: str | None = None,
@@ -25,6 +26,7 @@ class CodexWorker:
         config = load_runtime_config().get("workers", {}).get("codex", {})
         self.codex_executable = codex_executable or str(config.get("executable") or "codex")
         self.profile = profile or str(config.get("profile") or "workforce-openrouter")
+        self.model = model or config.get("model")
         self.timeout_seconds = timeout_seconds if timeout_seconds is not None else config.get("timeout_seconds")
         self.approval_policy = approval_policy or str(config.get("approval_policy") or "never")
         self.sandbox_mode = sandbox_mode or str(config.get("sandbox_mode") or "workspace-write")
@@ -57,6 +59,7 @@ class CodexWorker:
             self.codex_executable,
             "--profile",
             self.profile,
+            *(["-m", str(self.model)] if self.model else []),
             "-a",
             self.approval_policy,
             "-s",

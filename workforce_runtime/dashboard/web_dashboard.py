@@ -3232,6 +3232,16 @@ HTML = r"""<!doctype html>
 
     function summarizeActivity(activity, node = null) {
       const candidates = [];
+      const output = (activity.full_output || activity.output || []).slice(-1)[0];
+      if (output) {
+        const label = output.stream === "error" ? "Error" : (output.stream || "output");
+        candidates.push({
+          timestamp: output.timestamp || "",
+          text: clip(`${label}: ${output.text || ""}`),
+          task_id: output.task_id || "",
+          event_type: output.event_type || "output",
+        });
+      }
       const tool = (activity.tools || []).slice(-1)[0];
       if (tool) {
         const target = tool.target_agent_id ? ` -> ${tool.target_agent_id}` : "";

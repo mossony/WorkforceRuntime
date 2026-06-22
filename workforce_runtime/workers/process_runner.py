@@ -10,6 +10,10 @@ from pathlib import Path
 from workforce_runtime.server.runtime import WorkforceRuntime
 from workforce_runtime.storage import FileStore
 
+STREAM_EVENT_MAX_CHARS = 1200
+STREAM_EVENT_PARTIAL_FLUSH_SECONDS = 1.0
+SENTENCE_END_CHARS = ".!?。！？"
+
 
 @dataclass(frozen=True)
 class StreamedProcessResult:
@@ -55,20 +59,41 @@ def run_process_streaming(
     selector.register(process.stdout, selectors.EVENT_READ, "stdout")
     selector.register(process.stderr, selectors.EVENT_READ, "stderr")
 
+    start = time.monotonic()
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []
-    start = time.monotonic()
+    stream_buffers = {"stdout": "", "stderr": ""}
+    stream_updated_at = {"stdout": start, "stderr": start}
     timed_out = False
+
+    def record_stream_text(stream: str, text: str) -> None:
+        runtime.record_worker_output(
+            run_id=run_id,
+            task_id=task_id,
+            actor_id=agent_id,
+            stream=stream,
+            text=text,
+        )
+
+    def flush_stream(stream: str, *, force: bool = False) -> None:
+        chunks, remainder = _stream_text_flushes(stream_buffers[stream], force=force)
+        stream_buffers[stream] = remainder
+        if chunks:
+            stream_updated_at[stream] = time.monotonic()
+        for text in chunks:
+            record_stream_text(stream, text)
 
     while selector.get_map():
         if timeout_seconds is not None and not timed_out and time.monotonic() - start > timeout_seconds:
             timed_out = True
             process.kill()
 
-        for key, _mask in selector.select(timeout=0.1):
+        ready = selector.select(timeout=0.1)
+        for key, _mask in ready:
             stream = str(key.data)
             data = os.read(key.fileobj.fileno(), 4096)
             if not data:
+                flush_stream(stream, force=True)
                 selector.unregister(key.fileobj)
                 key.fileobj.close()
                 continue
@@ -76,20 +101,30 @@ def run_process_streaming(
                 stdout_chunks.append(data)
             else:
                 stderr_chunks.append(data)
-            for text in _stream_text_chunks(data.decode(errors="replace")):
-                runtime.record_worker_output(
-                    run_id=run_id,
-                    task_id=task_id,
-                    actor_id=agent_id,
-                    stream=stream,
-                    text=text,
-                )
+            stream_buffers[stream] += data.decode(errors="replace")
+            stream_updated_at[stream] = time.monotonic()
+            flush_stream(stream)
+
+        now = time.monotonic()
+        for stream in ("stdout", "stderr"):
+            if stream_buffers[stream] and now - stream_updated_at[stream] >= STREAM_EVENT_PARTIAL_FLUSH_SECONDS:
+                flush_stream(stream, force=True)
+
+        if process.poll() is not None and not ready:
+            for key in list(selector.get_map().values()):
+                stream = str(key.data)
+                flush_stream(stream, force=True)
+                selector.unregister(key.fileobj)
+                key.fileobj.close()
+            break
 
         if process.poll() is not None and not selector.get_map():
             break
 
     raw_returncode = process.wait()
     returncode = -1 if timed_out else raw_returncode
+    for stream in ("stdout", "stderr"):
+        flush_stream(stream, force=True)
     if timed_out and not stderr_chunks:
         stderr_chunks.append(timeout_message.encode())
         runtime.record_worker_output(
@@ -127,16 +162,56 @@ def run_process_streaming(
     )
 
 
-def _stream_text_chunks(text: str) -> list[str]:
+def _stream_text_flushes(text: str, *, force: bool = False) -> tuple[list[str], str]:
     if not text:
-        return []
-    parts: list[str] = []
-    current = ""
-    for char in text:
-        current += char
-        if char.isspace():
-            parts.append(current)
-            current = ""
-    if current:
-        parts.append(current)
-    return parts
+        return [], ""
+    if force:
+        return _split_long_stream_text(text), ""
+
+    chunks: list[str] = []
+    remainder = text
+    while remainder:
+        boundary = _stream_text_boundary(remainder)
+        if boundary is None:
+            break
+        chunks.extend(_split_long_stream_text(remainder[:boundary]))
+        remainder = remainder[boundary:]
+
+    while len(remainder) >= STREAM_EVENT_MAX_CHARS:
+        chunk, remainder = _take_long_stream_chunk(remainder)
+        chunks.append(chunk)
+
+    return [chunk for chunk in chunks if chunk], remainder
+
+
+def _stream_text_boundary(text: str) -> int | None:
+    for index, char in enumerate(text):
+        if char == "\n":
+            return index + 1
+        if char in SENTENCE_END_CHARS:
+            next_index = index + 1
+            if next_index == len(text) or text[next_index].isspace():
+                while next_index < len(text) and text[next_index].isspace() and text[next_index] != "\n":
+                    next_index += 1
+                return next_index
+    return None
+
+
+def _split_long_stream_text(text: str) -> list[str]:
+    chunks: list[str] = []
+    remainder = text
+    while len(remainder) > STREAM_EVENT_MAX_CHARS:
+        chunk, remainder = _take_long_stream_chunk(remainder)
+        chunks.append(chunk)
+    if remainder:
+        chunks.append(remainder)
+    return chunks
+
+
+def _take_long_stream_chunk(text: str) -> tuple[str, str]:
+    cut = text.rfind(" ", 0, STREAM_EVENT_MAX_CHARS)
+    if cut < STREAM_EVENT_MAX_CHARS // 2:
+        cut = STREAM_EVENT_MAX_CHARS
+    else:
+        cut += 1
+    return text[:cut], text[cut:]
