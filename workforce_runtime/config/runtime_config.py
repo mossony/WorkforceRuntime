@@ -140,6 +140,15 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
             "provider": "anthropic_sandbox_runtime",
             "command_prefix": ["srt", "--settings", "{settings_path}"],
             "settings_path": "examples/sandbox_runtime_settings.json",
+            "queue_mcp_tools": True,
+            "mcp_tool_queue_timeout_seconds": 30.0,
+            "mcp_tool_queue_excluded_tools": [
+                "enqueue_work",
+                "claim_work",
+                "complete_work",
+                "fail_work",
+                "get_work_queue",
+            ],
             "worker_extra_args": {
                 "codex": [],
                 "claude_code": ["--dangerously-skip-permissions"],

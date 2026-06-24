@@ -596,6 +596,75 @@ class WorkforceRuntime:
             )
         return claimed
 
+    def claim_work_item(
+        self,
+        work_item_id: str,
+        *,
+        lease_owner: str,
+        policy: WorkQueuePolicy | dict[str, object] | None = None,
+        now: datetime | None = None,
+    ) -> WorkItem | None:
+        queue_policy = _queue_policy(policy)
+        effective_now = now or _utc_now()
+        self.release_expired_work_item_leases(now=effective_now)
+
+        item = self.store.get_work_item(work_item_id)
+        if item is None:
+            raise KeyError(f"work item not found: {work_item_id}")
+        if item.status != "queued":
+            return None
+        if item.attempts >= item.max_attempts:
+            failed = item.model_copy(
+                update={
+                    "status": "failed",
+                    "error": "max attempts exhausted before claim",
+                    "updated_at": effective_now,
+                }
+            )
+            self.store.save_work_item(failed)
+            self.record_event(
+                event_type="work_item_failed",
+                actor_id=lease_owner,
+                task_id=failed.task_id,
+                payload={**_work_item_event_payload(failed), "error": failed.error},
+            )
+            return None
+
+        active = [candidate for candidate in self.store.list_work_items() if candidate.is_active(effective_now)]
+        active_agents = {candidate.agent_id for candidate in active}
+        active_kind_counts = _queue_counts(active, "kind")
+        active_model_counts = _queue_counts(active, "model")
+        active_tool_counts = _queue_counts(active, "tool_name")
+        if not queue_policy.allow_same_agent_parallel and item.agent_id in active_agents:
+            return None
+        if item.agent_id not in active_agents and len(active_agents) >= queue_policy.max_active_agents:
+            return None
+        if not _under_limit(active_kind_counts.get(item.kind, 0), queue_policy.per_kind_limits.get(item.kind, 0)):
+            return None
+        if item.model and not _under_limit(active_model_counts.get(item.model, 0), queue_policy.per_model_limits.get(item.model, 0)):
+            return None
+        if item.tool_name and not _under_limit(active_tool_counts.get(item.tool_name, 0), queue_policy.per_tool_limits.get(item.tool_name, 0)):
+            return None
+
+        leased = item.model_copy(
+            update={
+                "status": "leased",
+                "lease_owner": lease_owner,
+                "leased_at": effective_now,
+                "lease_until": effective_now + timedelta(seconds=queue_policy.lease_seconds),
+                "attempts": item.attempts + 1,
+                "updated_at": effective_now,
+            }
+        )
+        self.store.save_work_item(leased)
+        self.record_event(
+            event_type="work_item_claimed",
+            actor_id=lease_owner,
+            task_id=leased.task_id,
+            payload=_work_item_event_payload(leased),
+        )
+        return leased
+
     def complete_work_item(
         self,
         work_item_id: str,

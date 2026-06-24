@@ -175,6 +175,56 @@ def test_mcp_work_queue_tools_end_to_end(tmp_path: Path) -> None:
     assert queue["queue"]["status_counts"]["completed"] == 1
 
 
+def test_mcp_tool_calls_are_queued_in_sandbox_mode(tmp_path: Path) -> None:
+    config = {
+        "execution": {
+            "mode": "sandbox",
+            "sandbox": {
+                "queue_mcp_tools": True,
+                "mcp_tool_queue_timeout_seconds": 1,
+                "mcp_tool_queue_excluded_tools": ["enqueue_work", "claim_work", "complete_work", "fail_work", "get_work_queue"],
+            },
+        },
+        "queue": {
+            "max_active_agents": 1,
+            "lease_seconds": 30,
+            "per_kind_limits": {"tool_call": 1},
+            "per_tool_limits": {"report": 1},
+        },
+    }
+    with WorkforceRuntime(tmp_path / "runtime.sqlite") as runtime:
+        runtime.initialize_org(EXAMPLE_ORG)
+        task = runtime.create_task(title="Queued report", objective="Report through queue.", assign_to="codex_worker")
+        server = MCPServer(runtime, config=config)
+
+        reported = _mcp_tool_call(
+            server,
+            "report",
+            {
+                "from_agent_id": "codex_worker",
+                "task_id": task.task_id,
+                "summary": "Queued report completed.",
+                "status": "completed",
+                "confidence": 0.9,
+                "work_done": ["reported through queue"],
+                "evidence": [],
+                "risks": [],
+                "blockers": [],
+                "cost": {"tokens_used": 0, "runtime_seconds": 0, "tool_calls": 1},
+            },
+        )
+        items = runtime.store.list_work_items()
+        event_types = [event.event_type for event in runtime.store.list_events()]
+
+    assert reported["ok"] is True
+    assert len(items) == 1
+    assert items[0].kind == "tool_call"
+    assert items[0].tool_name == "report"
+    assert items[0].status == "completed"
+    assert "mcp_tool_call_queued" in event_types
+    assert "work_item_completed" in event_types
+
+
 def _mcp_tool_call(server: MCPServer, name: str, arguments: dict[str, object]) -> dict[str, object]:
     response = server.handle(
         {

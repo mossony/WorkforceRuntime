@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,8 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "fail_work": fail_work,
     "get_work_queue": get_work_queue,
 }
+
+QUEUE_CONTROL_TOOLS = {"enqueue_work", "claim_work", "complete_work", "fail_work", "get_work_queue"}
 
 
 def tool_specs() -> list[dict[str, object]]:
@@ -357,8 +360,9 @@ def tool_specs() -> list[dict[str, object]]:
 
 
 class MCPServer:
-    def __init__(self, runtime: WorkforceRuntime) -> None:
+    def __init__(self, runtime: WorkforceRuntime, config: dict[str, Any] | None = None) -> None:
         self.runtime = runtime
+        self.config = config or load_runtime_config()
 
     def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
         request_id = message.get("id")
@@ -395,7 +399,7 @@ class MCPServer:
                     payload={"tool_name": name, **_summarize_tool_arguments(arguments)},
                 )
                 try:
-                    structured = TOOL_HANDLERS[name](self.runtime, arguments)
+                    structured = self._execute_tool(name, arguments, actor_id=actor_id, task_id=task_id)
                 except Exception as exc:
                     self.runtime.record_event(
                         event_type="mcp_tool_call_failed",
@@ -425,6 +429,69 @@ class MCPServer:
                 "error": {"code": -32000, "message": str(exc)},
             }
 
+    def _execute_tool(
+        self,
+        name: str,
+        arguments: dict[str, object],
+        *,
+        actor_id: str,
+        task_id: str | None,
+    ) -> dict[str, object]:
+        if not _should_queue_mcp_tool(self.runtime, self.config, name=name, actor_id=actor_id):
+            return TOOL_HANDLERS[name](self.runtime, arguments)
+        return self._execute_queued_tool(name, arguments, actor_id=actor_id, task_id=task_id)
+
+    def _execute_queued_tool(
+        self,
+        name: str,
+        arguments: dict[str, object],
+        *,
+        actor_id: str,
+        task_id: str | None,
+    ) -> dict[str, object]:
+        work_item = self.runtime.enqueue_work_item(
+            actor_id=actor_id,
+            agent_id=actor_id,
+            kind="tool_call",
+            task_id=task_id,
+            payload={"tool_name": name, "arguments": arguments},
+            tool_name=name,
+            max_attempts=1,
+        )
+        self.runtime.record_event(
+            event_type="mcp_tool_call_queued",
+            actor_id=actor_id,
+            task_id=task_id,
+            payload={"tool_name": name, "work_item_id": work_item.work_item_id},
+        )
+
+        queue_policy = dict(self.config.get("queue") or {})
+        queue_policy["allow_same_agent_parallel"] = True
+        timeout_seconds = _mcp_tool_queue_timeout_seconds(self.config)
+        deadline = time.monotonic() + timeout_seconds
+        lease_owner = f"mcp_tool:{name}"
+        while True:
+            claimed = self.runtime.claim_work_item(work_item.work_item_id, lease_owner=lease_owner, policy=queue_policy)
+            if claimed is not None:
+                break
+            if time.monotonic() >= deadline:
+                self.runtime.fail_work_item(
+                    work_item.work_item_id,
+                    actor_id=lease_owner,
+                    error=f"timed out waiting for MCP tool queue slot: {name}",
+                    retry=False,
+                )
+                raise TimeoutError(f"timed out waiting for MCP tool queue slot: {name}")
+            time.sleep(0.05)
+
+        try:
+            structured = TOOL_HANDLERS[name](self.runtime, arguments)
+        except Exception as exc:
+            self.runtime.fail_work_item(work_item.work_item_id, actor_id=lease_owner, error=str(exc), retry=False)
+            raise
+        self.runtime.complete_work_item(work_item.work_item_id, actor_id=lease_owner, result={"tool_result": structured})
+        return structured
+
 
 def _tool_actor_id(arguments: dict[str, object]) -> str:
     for key in ("from_agent_id", "agent_id", "caller_id", "requested_by"):
@@ -437,6 +504,39 @@ def _tool_task_id(arguments: dict[str, object]) -> str | None:
     if arguments.get("task_id"):
         return str(arguments["task_id"])
     return None
+
+
+def _should_queue_mcp_tool(
+    runtime: WorkforceRuntime,
+    config: dict[str, Any],
+    *,
+    name: str,
+    actor_id: str,
+) -> bool:
+    execution = config.get("execution") if isinstance(config.get("execution"), dict) else {}
+    if str(execution.get("mode") or "full_access") != "sandbox":
+        return False
+    sandbox = execution.get("sandbox") if isinstance(execution.get("sandbox"), dict) else {}
+    if not bool(sandbox.get("queue_mcp_tools", False)):
+        return False
+    excluded = sandbox.get("mcp_tool_queue_excluded_tools") or list(QUEUE_CONTROL_TOOLS)
+    if name in {str(item) for item in excluded}:
+        return False
+    if name in QUEUE_CONTROL_TOOLS:
+        return False
+    if actor_id == "unknown" or runtime.store.get_agent(actor_id) is None:
+        return False
+    return True
+
+
+def _mcp_tool_queue_timeout_seconds(config: dict[str, Any]) -> float:
+    execution = config.get("execution") if isinstance(config.get("execution"), dict) else {}
+    sandbox = execution.get("sandbox") if isinstance(execution.get("sandbox"), dict) else {}
+    value = sandbox.get("mcp_tool_queue_timeout_seconds", 30.0)
+    try:
+        return max(0.1, float(value))
+    except (TypeError, ValueError):
+        return 30.0
 
 
 def _summarize_tool_arguments(arguments: dict[str, object]) -> dict[str, object]:
@@ -512,9 +612,9 @@ def _clip(text: str, limit: int = 300) -> str:
     return compact[: limit - 3] + "..."
 
 
-def serve_stdio(db_path: str | Path) -> None:
+def serve_stdio(db_path: str | Path, config: dict[str, Any] | None = None) -> None:
     with WorkforceRuntime(db_path) as runtime:
-        server = MCPServer(runtime)
+        server = MCPServer(runtime, config=config)
         for line in sys.stdin:
             line = line.strip()
             if not line:
@@ -537,7 +637,7 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     config = load_runtime_config(args.config)
     db_path = args.db or Path(str(config.get("runtime", {}).get("db_path") or ".workforce_runtime/runtime.sqlite"))
-    serve_stdio(db_path)
+    serve_stdio(db_path, config=config)
 
 
 if __name__ == "__main__":

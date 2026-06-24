@@ -60,6 +60,11 @@ visible to Workforce Runtime. Per-tool queueing is available for Workforce MCP
 tools; native Codex or Claude Code tools require process sandboxing, disabling
 native tools, or replacing them with queued MCP tools.
 
+In sandbox mode, `execution.sandbox.queue_mcp_tools` can route non-queue MCP
+tools through the persistent `tool_call` queue before synchronous execution.
+Queue management tools such as `enqueue_work`, `claim_work`, and
+`complete_work` are excluded to avoid recursive queueing.
+
 ## Model Provider
 
 Codex ignores provider/auth settings in project-local `.codex/config.toml`, so

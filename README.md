@@ -76,10 +76,12 @@ it to `sandbox` prepends the configured `execution.sandbox.command_prefix` to
 Codex and Claude Code worker processes, so their native file, shell, and MCP
 activity runs inside an external OS sandbox such as Anthropic Sandbox Runtime
 (`srt`) or a Docker wrapper. Workforce Runtime records a
-`worker_sandbox_applied` event for sandboxed runs. This is process-level
-containment; MCP tools can also be queued by Workforce Runtime, but Codex and
-Claude native tool calls are not individually visible unless those CLIs are
-configured to use queued MCP tools instead of their native tools.
+`worker_sandbox_applied` event for sandboxed runs. When
+`execution.sandbox.queue_mcp_tools` is enabled, Workforce Runtime also routes
+non-queue MCP tool calls through the persistent `tool_call` queue before
+executing them. This is process-level containment plus MCP-level queueing; Codex
+and Claude native tool calls are still not individually visible unless those
+CLIs are configured to use queued MCP tools instead of their native tools.
 
 The parser demo creates a small git workspace, assigns a planning task to an engineering manager, delegates a parser bug fix to a worker, receives MCP reports and artifacts, runs manager review, and prints a text dashboard. The smaller status demo uses management agents routed to `openai/gpt-oss-120b:free` and a terminal worker routed to `poolside/laguna-xs.2:free` as local metadata, then prints dashboard snapshots, event replay, and per-agent trajectories. The web research demo uses real network access plus MCP `assign`, `check_progress`, `get_task_context`, `discuss`, `submit_artifact`, and `report` calls. The large-org smoke demo validates the persistent work queue and does not launch thousands of external model processes.
 
