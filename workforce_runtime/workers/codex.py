@@ -10,6 +10,10 @@ from workforce_runtime.core import Artifact, ReportContract, TaskContract, Usage
 from workforce_runtime.storage import FileStore
 from workforce_runtime.workers.base import RuntimeContext, WorkerRun
 from workforce_runtime.workers.process_runner import run_process_streaming
+from workforce_runtime.workers.session_resume import (
+    consume_queued_steers_for_resume,
+    extract_codex_session_id,
+)
 
 
 class CodexWorker:
@@ -38,7 +42,8 @@ class CodexWorker:
 
     def start_task(self, task: TaskContract, runtime_context: RuntimeContext) -> WorkerRun:
         run_id = f"run_{uuid4().hex[:12]}"
-        file_store = FileStore(runtime_context.workspace)
+        workspace = runtime_context.workspace.resolve()
+        file_store = FileStore(workspace)
         task_dir = file_store.agent_task_run_dir(
             agent_id=runtime_context.agent_id,
             task_id=task.task_id,
@@ -65,7 +70,7 @@ class CodexWorker:
             "-s",
             self.sandbox_mode,
             "-C",
-            str(runtime_context.workspace),
+            str(workspace),
             "exec",
             "--json",
             "--output-last-message",
@@ -75,7 +80,7 @@ class CodexWorker:
 
         streamed = run_process_streaming(
             command=command,
-            cwd=runtime_context.workspace,
+            cwd=workspace,
             env=None,
             timeout_seconds=self.timeout_seconds,
             runtime=runtime_context.runtime,
@@ -90,11 +95,44 @@ class CodexWorker:
         stdout_path = streamed.stdout_path
         stderr_path = streamed.stderr_path
 
-        diff_path = self._capture_git_diff(file_store, runtime_context.workspace, task.task_id)
         usage = self._extract_usage(stdout_path)
         self._usage[run_id] = usage
 
         final_text = final_message_path.read_text() if final_message_path.exists() else ""
+        provider_session_id = extract_codex_session_id(stdout_path.read_text())
+        resume_command = f"codex exec resume {provider_session_id}" if provider_session_id else ""
+        session_metadata: dict[str, object] = {
+            "executable": self.codex_executable,
+            "profile": self.profile,
+            "model": self.model or "",
+            "approval_policy": self.approval_policy,
+            "sandbox_mode": self.sandbox_mode,
+            "timeout_seconds": self.timeout_seconds or "",
+        }
+        if provider_session_id:
+            runtime_context.runtime.record_provider_session(
+                provider="codex",
+                provider_session_id=provider_session_id,
+                run_id=run_id,
+                task_id=task.task_id,
+                actor_id=runtime_context.agent_id,
+                workspace=str(workspace),
+                resume_command=resume_command,
+                worker_type="codex",
+                metadata=session_metadata,
+            )
+            queued_results = consume_queued_steers_for_resume(
+                runtime_context.runtime,
+                agent_id=runtime_context.agent_id,
+                task_id=task.task_id,
+                provider_session_id=provider_session_id,
+                workspace=workspace,
+                metadata=session_metadata,
+            )
+            if queued_results and queued_results[-1].final_text.strip():
+                final_text = queued_results[-1].final_text
+                final_message_path.write_text(final_text)
+        diff_path = self._capture_git_diff(file_store, workspace, task.task_id)
         final_status = "completed" if returncode == 0 and final_text.strip() else "failed"
 
         if final_message_path.exists():
@@ -159,6 +197,8 @@ class CodexWorker:
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             task_contract_path=task_contract_path,
+            provider_session_id=provider_session_id,
+            resume_command=resume_command,
         )
         self._runs[run_id] = run
         return run

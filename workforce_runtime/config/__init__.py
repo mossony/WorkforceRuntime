@@ -6,6 +6,11 @@ from workforce_runtime.config.model_registry import (
     load_model_registry,
     model_capabilities,
 )
+from workforce_runtime.config.model_failover import (
+    choose_agent_replacement_model,
+    is_model_available,
+    is_unavailable_model_error,
+)
 from workforce_runtime.config.runtime_config import (
     DEFAULT_RUNTIME_CONFIG,
     DEFAULT_RUNTIME_CONFIG_PATH,
@@ -22,6 +27,9 @@ __all__ = [
     "DEFAULT_RUNTIME_CONFIG_PATH",
     "dashboard_config_from_runtime",
     "format_model_context_note",
+    "choose_agent_replacement_model",
+    "is_model_available",
+    "is_unavailable_model_error",
     "load_model_registry",
     "load_runtime_config",
     "merge_runtime_config",

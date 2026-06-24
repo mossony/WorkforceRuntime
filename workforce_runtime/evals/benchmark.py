@@ -1004,10 +1004,18 @@ def _normalize_score(value: Any) -> float:
 
 
 def _first_word_boundary(text: str) -> int:
-    for index, char in enumerate(text):
-        if char.isspace():
+    if not text:
+        return 0
+    for delimiter in ("\n", ". ", "? ", "! ", "。", "？", "！"):
+        index = text.find(delimiter)
+        if index >= 0 and index + len(delimiter) >= 40:
+            return index + len(delimiter)
+    if len(text) < 220:
+        return 0
+    for index in range(min(len(text), 260) - 1, 80, -1):
+        if text[index].isspace():
             return index + 1
-    return 0
+    return min(len(text), 260)
 
 
 def _fetch_sources(

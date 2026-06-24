@@ -10,6 +10,10 @@ from workforce_runtime.core import Artifact, ReportContract, TaskContract, Usage
 from workforce_runtime.storage import FileStore
 from workforce_runtime.workers.base import RuntimeContext, WorkerRun
 from workforce_runtime.workers.process_runner import run_process_streaming
+from workforce_runtime.workers.session_resume import (
+    consume_queued_steers_for_resume,
+    extract_claude_session_id,
+)
 
 
 class ClaudeCodeWorker:
@@ -30,7 +34,8 @@ class ClaudeCodeWorker:
 
     def start_task(self, task: TaskContract, runtime_context: RuntimeContext) -> WorkerRun:
         run_id = f"run_{uuid4().hex[:12]}"
-        file_store = FileStore(runtime_context.workspace)
+        workspace = runtime_context.workspace.resolve()
+        file_store = FileStore(workspace)
         task_dir = file_store.agent_task_run_dir(
             agent_id=runtime_context.agent_id,
             task_id=task.task_id,
@@ -57,7 +62,7 @@ class ClaudeCodeWorker:
 
         streamed = run_process_streaming(
             command=command,
-            cwd=runtime_context.workspace,
+            cwd=workspace,
             env=None,
             timeout_seconds=self.timeout_seconds,
             runtime=runtime_context.runtime,
@@ -74,9 +79,38 @@ class ClaudeCodeWorker:
 
         final_text, usage = self._extract_result(stdout_path)
         final_message_path.write_text(final_text)
-        diff_path = self._capture_git_diff(file_store, runtime_context.workspace, task.task_id)
         self._usage[run_id] = usage
+        provider_session_id = extract_claude_session_id(stdout_path.read_text())
+        resume_command = f"claude -p --resume {provider_session_id}" if provider_session_id else ""
+        session_metadata: dict[str, object] = {
+            "executable": self.claude_executable,
+            "timeout_seconds": self.timeout_seconds or "",
+        }
+        if provider_session_id:
+            runtime_context.runtime.record_provider_session(
+                provider="claude_code",
+                provider_session_id=provider_session_id,
+                run_id=run_id,
+                task_id=task.task_id,
+                actor_id=runtime_context.agent_id,
+                workspace=str(workspace),
+                resume_command=resume_command,
+                worker_type="claude_code",
+                metadata=session_metadata,
+            )
+            queued_results = consume_queued_steers_for_resume(
+                runtime_context.runtime,
+                agent_id=runtime_context.agent_id,
+                task_id=task.task_id,
+                provider_session_id=provider_session_id,
+                workspace=workspace,
+                metadata=session_metadata,
+            )
+            if queued_results and queued_results[-1].final_text.strip():
+                final_text = queued_results[-1].final_text
+                final_message_path.write_text(final_text)
 
+        diff_path = self._capture_git_diff(file_store, workspace, task.task_id)
         final_status = "completed" if returncode == 0 and final_text.strip() else "failed"
         runtime_context.runtime.register_artifact(
             Artifact(
@@ -139,6 +173,8 @@ class ClaudeCodeWorker:
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             task_contract_path=task_contract_path,
+            provider_session_id=provider_session_id,
+            resume_command=resume_command,
         )
         self._runs[run_id] = run
         return run

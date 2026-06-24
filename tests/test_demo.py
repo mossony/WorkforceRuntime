@@ -5,7 +5,20 @@ import sys
 import re
 from pathlib import Path
 
-from workforce_runtime.server.demo import run_sample_repo_fix_demo, run_simple_status_demo, run_web_research_demo
+from workforce_runtime.server.demo import (
+    build_large_scale_organization,
+    run_large_org_scale_demo,
+    run_sample_repo_fix_demo,
+    run_simple_status_demo,
+    run_web_research_demo,
+)
+from workforce_runtime.server.large_task_100 import (
+    _apply_governor_design_actions,
+    _organization_from_design_policy,
+    build_large_task_100_organization,
+    load_large_task_positions,
+)
+from workforce_runtime.server.runtime import WorkforceRuntime
 
 
 def test_sample_repo_fix_demo_runs_no_tools_and_tool_tasks(tmp_path: Path) -> None:
@@ -130,3 +143,113 @@ def test_web_research_demo_runs_with_tool_calls_and_artifact(tmp_path: Path, mon
     summary = workspace / "artifacts" / worker_task_id / "web_research_summary.md"
     assert summary.exists()
     assert "Example Domain Fixture" in summary.read_text()
+
+
+def test_large_scale_org_builder_creates_requested_headcount() -> None:
+    organization = build_large_scale_organization(agent_count=120)
+
+    assert organization.company.headcount_limit == 120
+    assert len(organization.agents) == 120
+    assert organization.require_agent("ceo").manager_id is None
+    assert any(agent.manager_id == "ceo" for agent in organization.agents)
+    workers = [agent for agent in organization.agents if agent.worker_type == "openrouter_worker"]
+    assert workers
+    assert all(worker.manager_id for worker in workers)
+
+
+def test_large_task_100_plan_parser_and_fallback_builder() -> None:
+    positions = load_large_task_positions()
+
+    assert len(positions) == 100
+    assert positions[0].role == "Chief Executive Officer"
+    assert positions[-1].role == "Organizational Effectiveness Analyst"
+
+    organization = build_large_task_100_organization(max_agents=12)
+    roots = [agent for agent in organization.agents if agent.manager_id is None]
+
+    assert len(organization.agents) == 12
+    assert len(roots) == 1
+    assert "report_to_human" in roots[0].permissions
+
+
+def test_large_task_100_governor_can_apply_safe_org_overrides() -> None:
+    organization = build_large_task_100_organization(max_agents=12)
+
+    governed, applied, errors = _apply_governor_design_actions(
+        organization,
+        review={
+            "reporting_overrides": [
+                {"agent_id": "chief_financial_officer", "manager_id": "chief_technology_officer"},
+                {"agent_id": "chief_executive_officer", "manager_id": "chief_operating_officer"},
+            ]
+        },
+        management_models=["openai/gpt-oss-120b:free"],
+        worker_models=["poolside/laguna-m.1:free"],
+    )
+
+    assert governed.require_agent("chief_financial_officer").manager_id == "chief_executive_officer"
+    assert governed.require_agent("chief_executive_officer").manager_id is None
+    assert not applied
+    assert any("chief_financial_officer" in error for error in errors)
+    assert any("refused to move root agent" in error for error in errors)
+
+
+def test_large_task_100_policy_instantiation_uses_intermediate_managers() -> None:
+    organization = _organization_from_design_policy(
+        positions=load_large_task_positions(),
+        policy={
+            "company_name": "OpenForge Test",
+            "mission": "Test policy instantiation",
+            "manager_role_keywords": ["chief", "head", "lead", "director", "manager", "architect"],
+            "default_management_model": "openai/gpt-oss-120b:free",
+            "default_worker_model": "poolside/laguna-m.1:free",
+        },
+        management_models=["openai/gpt-oss-120b:free"],
+        worker_models=["poolside/laguna-m.1:free"],
+    )
+    direct_reports: dict[str, list[str]] = {}
+    for agent in organization.agents:
+        if agent.manager_id:
+            direct_reports.setdefault(agent.manager_id, []).append(agent.id)
+
+    assert len(direct_reports["chief_executive_officer"]) == 4
+    assert organization.require_agent("chief_financial_officer").manager_id == "chief_operating_officer"
+    assert organization.require_agent("chief_risk_and_governance_officer").manager_id == "chief_executive_officer"
+    assert organization.require_agent("security_architect").manager_id == "chief_risk_and_governance_officer"
+    assert organization.require_agent("chief_of_staff").manager_id == "chief_operating_officer"
+    assert organization.require_agent("portfolio_management_director").manager_id == "chief_operating_officer"
+    assert organization.require_agent("customer_interview_researcher").manager_id == "ux_research_lead"
+    assert organization.require_agent("competitive_intelligence_analyst").manager_id == "ux_research_lead"
+    assert organization.require_agent("financial_controller").manager_id == "chief_financial_officer"
+    assert organization.require_agent("budget_and_forecast_analyst").manager_id == "chief_financial_officer"
+    assert len(direct_reports["chief_software_architect"]) <= 8
+    assert max(len(reports) for reports in direct_reports.values()) <= 8
+    for agent in organization.agents:
+        if agent.worker_type == "openrouter_worker":
+            assert agent.model != "openai/gpt-oss-120b:free"
+
+
+def test_large_org_scale_demo_initializes_and_caps_active_slots(tmp_path: Path) -> None:
+    db_path = tmp_path / "large.sqlite"
+    workspace = tmp_path / "large_workspace"
+
+    output = run_large_org_scale_demo(db_path, workspace, agent_count=120, active_agent_limit=7)
+
+    assert "Workforce Runtime Demo: large-org-scale" in output
+    assert "Agents initialized: 120" in output
+    assert "Queued worker_run items: 114" in output
+    assert "Configured active agent limit: 7" in output
+    assert "Claimed active queue items: 7" in output
+    assert "Simulated active worker runs: 7" in output
+    with WorkforceRuntime(db_path) as runtime:
+        agents = runtime.store.list_agents()
+        busy_agents = [agent for agent in agents if agent.status == "busy"]
+        events = runtime.store.list_events()
+        work_items = runtime.store.list_work_items()
+
+    assert len(agents) == 120
+    assert len(busy_agents) == 7
+    assert len(work_items) == 114
+    assert sum(1 for item in work_items if item.status == "leased") == 7
+    assert sum(1 for event in events if event.event_type == "worker_run_started") == 7
+    assert any(event.event_type == "human_report_registered" for event in events)

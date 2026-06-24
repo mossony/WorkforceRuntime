@@ -3,10 +3,10 @@ from __future__ import annotations
 from workforce_runtime.core import AgentProfile, TaskContract
 from workforce_runtime.core.organization import Company, Organization
 from workforce_runtime.dashboard.summaries import total_budget_usage, worker_performance
-from workforce_runtime.storage import SQLiteStore
+from workforce_runtime.storage import RuntimeStore
 
 
-def render_text_dashboard(store: SQLiteStore) -> str:
+def render_text_dashboard(store: RuntimeStore) -> str:
     company = store.get_company() or Company(name="Unknown Workforce")
     agents = store.list_agents()
     tasks = store.list_tasks()
@@ -162,7 +162,7 @@ def render_text_dashboard(store: SQLiteStore) -> str:
     return "\n".join(lines)
 
 
-def render_event_replay(store: SQLiteStore) -> str:
+def render_event_replay(store: RuntimeStore) -> str:
     events = store.list_events()
     lines = [
         "Event Replay",
@@ -180,7 +180,7 @@ def render_event_replay(store: SQLiteStore) -> str:
     return "\n".join(lines)
 
 
-def render_agent_trajectories(store: SQLiteStore) -> str:
+def render_agent_trajectories(store: RuntimeStore) -> str:
     agents = store.list_agents()
     tasks = store.list_tasks()
     reports = store.list_reports()

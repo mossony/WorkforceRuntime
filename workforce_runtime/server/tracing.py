@@ -89,12 +89,13 @@ def build_task_trace_payload(
     reports = [report for report in runtime.store.list_reports() if report.task_id in task_ids]
     artifacts = [artifact for artifact in runtime.store.list_artifacts() if artifact.task_id in task_ids]
     documents = [document for document in runtime.store.list_task_documents() if document.task_id in task_ids]
+    work_items = [item for item in runtime.store.list_work_items() if item.task_id in task_ids]
     sequenced_events = [
         item
         for item in runtime.store.list_events_after(0, limit=1_000_000)
         if _event_references_task(item.event, task_ids)
     ]
-    involved_agent_ids = _involved_agent_ids(tasks, reports, artifacts, sequenced_events)
+    involved_agent_ids = _involved_agent_ids(tasks, reports, artifacts, work_items, sequenced_events)
     agents = [
         agent
         for agent in runtime.store.list_agents()
@@ -123,6 +124,7 @@ def build_task_trace_payload(
             "report_count": len(reports),
             "artifact_count": len(artifacts),
             "document_count": len(documents),
+            "work_item_count": len(work_items),
             "agent_count": len(agents),
             "file_count": len(file_entries),
         },
@@ -132,6 +134,7 @@ def build_task_trace_payload(
         "documents": [document.model_dump(mode="json") for document in documents],
         "reports": [report.model_dump(mode="json") for report in reports],
         "artifacts": [artifact.model_dump(mode="json") for artifact in artifacts],
+        "work_items": [item.model_dump(mode="json") for item in work_items],
         "events": [
             {
                 "sequence": item.sequence,
@@ -183,7 +186,13 @@ def _event_references_task(event: Any, task_ids: list[str]) -> bool:
     return False
 
 
-def _involved_agent_ids(tasks: list[Any], reports: list[Any], artifacts: list[Any], events: list[Any]) -> set[str]:
+def _involved_agent_ids(
+    tasks: list[Any],
+    reports: list[Any],
+    artifacts: list[Any],
+    work_items: list[Any],
+    events: list[Any],
+) -> set[str]:
     ids: set[str] = set()
     for task in tasks:
         for value in (task.assigned_to, task.assigned_by):
@@ -194,6 +203,8 @@ def _involved_agent_ids(tasks: list[Any], reports: list[Any], artifacts: list[An
         ids.add(report.to_agent_id)
     for artifact in artifacts:
         ids.add(artifact.agent_id)
+    for item in work_items:
+        ids.add(item.agent_id)
     for item in events:
         event = item.event
         ids.add(event.actor_id)

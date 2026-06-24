@@ -21,6 +21,7 @@ from pathlib import Path
 Path("README.md").write_text("# Sample\\n\\nUpdated by fake Claude Code.\\n")
 print(json.dumps({
     "result": "Fake Claude Code completed the task.",
+    "session_id": "claude_fake",
     "usage": {
         "input_tokens": 12,
         "output_tokens": 7
@@ -62,6 +63,8 @@ def test_claude_code_worker_captures_outputs_diff_report_and_usage(tmp_path: Pat
         )
 
         assert run.returncode == 0
+        assert run.provider_session_id == "claude_fake"
+        assert run.resume_command == "claude -p --resume claude_fake"
         artifact_names = {path.name for path in worker.collect_artifacts(run.run_id)}
         assert {"task_contract.json", "stdout.log", "stderr.log", "claude-final.md", "diff.patch"} <= artifact_names
         assert worker.get_usage(run.run_id) == {"input_tokens": 12, "output_tokens": 7}
@@ -79,3 +82,4 @@ def test_claude_code_worker_captures_outputs_diff_report_and_usage(tmp_path: Pat
         assert "worker_run_started" in event_types
         assert "worker_output" in event_types
         assert "worker_run_finished" in event_types
+        assert "provider_session_registered" in event_types

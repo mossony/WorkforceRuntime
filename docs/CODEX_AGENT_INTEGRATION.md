@@ -64,13 +64,14 @@ budgets. OpenRouter request `max_tokens` / `max_completion_tokens` only limits
 how many output tokens a response may generate; it does not enlarge the model
 context window.
 
-Workforce Runtime keeps known OpenRouter model limits in
-`examples/openrouter_models.json` and the matching default registry in
-`workforce_runtime/config/model_registry.py`. Generated agent prompts include a
-short model-limit note when the assigned model is known, for example
+Workforce Runtime keeps known provider model limits in
+`workforce_runtime/config/model_registry.py`, with OpenRouter examples mirrored
+in `examples/openrouter_models.json`. Generated agent prompts include a short
+model-limit note when the assigned model is known, for example
 `openai/gpt-oss-120b:free` has a 131,072-token context window and
 `poolside/laguna-m.1:free` has a 262,144-token context window with up to 32,768
-output tokens.
+output tokens. OpenAI-compatible non-OpenRouter providers can also be registered
+there, such as NVIDIA NIM models configured through `NVIDIA_API_KEY`.
 
 Codex itself should still manage its own compaction and request shaping. The
 runtime-provided model-limit note is an operating hint for planning context,

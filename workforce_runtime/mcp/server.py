@@ -13,8 +13,13 @@ from workforce_runtime.mcp.tools.get_org_context import get_org_context
 from workforce_runtime.mcp.tools.get_task_context import get_task_context
 from workforce_runtime.mcp.tools.assign import assign
 from workforce_runtime.mcp.tools.check_progress import check_progress
+from workforce_runtime.mcp.tools.claim_work import claim_work
+from workforce_runtime.mcp.tools.complete_work import complete_work
 from workforce_runtime.mcp.tools.decide_tool_request import decide_tool_request
 from workforce_runtime.mcp.tools.discuss import discuss
+from workforce_runtime.mcp.tools.enqueue_work import enqueue_work
+from workforce_runtime.mcp.tools.fail_work import fail_work
+from workforce_runtime.mcp.tools.get_work_queue import get_work_queue
 from workforce_runtime.mcp.tools.hire import hire
 from workforce_runtime.mcp.tools.get_task_dossier import get_task_dossier
 from workforce_runtime.mcp.tools.report import report
@@ -52,6 +57,11 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "request_permission": request_permission,
     "get_task_context": get_task_context,
     "get_org_context": get_org_context,
+    "enqueue_work": enqueue_work,
+    "claim_work": claim_work,
+    "complete_work": complete_work,
+    "fail_work": fail_work,
+    "get_work_queue": get_work_queue,
 }
 
 
@@ -278,6 +288,71 @@ def tool_specs() -> list[dict[str, object]]:
         },
         {"name": "get_task_context", "description": "Get task context.", "inputSchema": {"type": "object"}},
         {"name": "get_org_context", "description": "Get organization context.", "inputSchema": {"type": "object"}},
+        {
+            "name": "enqueue_work",
+            "description": "Queue an LLM request, tool call, or worker run for bounded scheduler execution.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["from_agent_id", "agent_id", "kind"],
+                "properties": {
+                    "from_agent_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["llm_request", "tool_call", "worker_run"]},
+                    "payload": {"type": "object"},
+                    "priority": {"type": "integer"},
+                    "model": {"type": "string"},
+                    "tool_name": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                    "max_attempts": {"type": "integer", "minimum": 1},
+                },
+            },
+        },
+        {
+            "name": "claim_work",
+            "description": "Claim queued work items under max-active-agent, model, tool, and kind limits.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from_agent_id": {"type": "string"},
+                    "lease_owner": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1},
+                    "policy": {"type": "object"},
+                },
+            },
+        },
+        {
+            "name": "complete_work",
+            "description": "Mark a leased work item as completed and store its result.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["work_item_id"],
+                "properties": {
+                    "from_agent_id": {"type": "string"},
+                    "work_item_id": {"type": "string"},
+                    "result": {"type": "object"},
+                },
+            },
+        },
+        {
+            "name": "fail_work",
+            "description": "Mark a work item failed or requeue it when attempts remain.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["work_item_id", "error"],
+                "properties": {
+                    "from_agent_id": {"type": "string"},
+                    "work_item_id": {"type": "string"},
+                    "error": {"type": "string"},
+                    "retry": {"type": "boolean"},
+                },
+            },
+        },
+        {
+            "name": "get_work_queue",
+            "description": "Return the current persistent work queue state.",
+            "inputSchema": {"type": "object"},
+        },
     ]
 
 
@@ -377,6 +452,12 @@ def _summarize_tool_arguments(arguments: dict[str, object]) -> dict[str, object]
         "doc_id",
         "doc_type",
         "profile_agent_id",
+        "agent_id",
+        "work_item_id",
+        "kind",
+        "lease_owner",
+        "model",
+        "tool_name",
     ):
         if arguments.get(key):
             summary[key] = str(arguments[key])
@@ -406,6 +487,8 @@ def _summarize_tool_result(result: dict[str, object]) -> dict[str, object]:
         "human_report_id",
         "profile_agent_id",
         "revision",
+        "work_item_id",
+        "claimed_count",
     ):
         if result.get(key) is not None:
             summary[key] = str(result[key])

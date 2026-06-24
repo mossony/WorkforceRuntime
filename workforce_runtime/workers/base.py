@@ -25,6 +25,8 @@ class WorkerRun:
     stdout_path: Path
     stderr_path: Path
     task_contract_path: Path
+    provider_session_id: str = ""
+    resume_command: str = ""
 
 
 class WorkerAdapter(Protocol):

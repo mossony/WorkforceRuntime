@@ -13,8 +13,10 @@ from workforce_runtime.core import (
     TaskContract,
     TaskTraceExport,
     UsageCost,
+    WorkItem,
 )
-from workforce_runtime.storage import FileStore, SQLiteStore
+from workforce_runtime.server.runtime import WorkforceRuntime
+from workforce_runtime.storage import FileStore, RuntimeStore, SQLiteStore, create_runtime_store
 
 
 def make_agent() -> AgentProfile:
@@ -118,6 +120,48 @@ def test_sqlite_store_saves_and_loads_agent_task_report_event_and_artifact(tmp_p
         store.save_task_trace_export(trace)
         assert store.get_task_trace_export("tasktrace_task_001") == trace
         assert store.list_task_trace_exports_by_task("task_001") == [trace]
+
+        work_item = WorkItem(
+            work_item_id="work_001",
+            kind="llm_request",
+            agent_id="codex_worker",
+            task_id="task_001",
+            payload={"prompt": "fix"},
+            model="openai/gpt-oss-120b:free",
+        )
+        store.save_work_item(work_item)
+        assert store.get_work_item("work_001") == work_item
+        assert store.get_work_item_by_idempotency_key("missing") is None
+        assert store.list_work_items(status="queued") == [work_item]
+
+
+def test_sqlite_store_satisfies_runtime_store_protocol(tmp_path) -> None:
+    with SQLiteStore(tmp_path / "runtime.sqlite") as store:
+        assert isinstance(store, RuntimeStore)
+
+
+def test_runtime_store_factory_currently_supports_sqlite_only(tmp_path) -> None:
+    store = create_runtime_store("sqlite", tmp_path / "runtime.sqlite")
+    try:
+        assert isinstance(store, SQLiteStore)
+    finally:
+        store.close()
+
+    with pytest.raises(ValueError, match="unsupported runtime store backend"):
+        create_runtime_store("mysql", "mysql://localhost/workforce")
+
+
+def test_workforce_runtime_accepts_injected_store_without_owning_it(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "runtime.sqlite")
+    try:
+        runtime = WorkforceRuntime(tmp_path / "ignored.sqlite", store=store)
+        runtime.close()
+
+        agent = make_agent()
+        store.save_agent(agent)
+        assert store.get_agent(agent.id) == agent
+    finally:
+        store.close()
 
 
 def test_sqlite_events_are_append_only(tmp_path) -> None:

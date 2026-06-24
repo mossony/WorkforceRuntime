@@ -19,7 +19,7 @@ def load_dashboard_config(path: str | Path | None = None) -> dict[str, Any]:
     overrides = json.loads(config_path.read_text())
     if not isinstance(overrides, dict):
         raise ValueError(f"dashboard config must be a JSON object: {config_path}")
-    if any(key in overrides for key in ("runtime", "openrouter", "org_designer", "workers", "benchmarks")):
+    if any(key in overrides for key in ("runtime", "openrouter", "nvidia", "org_designer", "workers", "benchmarks")):
         return merge_dashboard_config(dashboard_config_from_runtime(overrides))
     return merge_dashboard_config(overrides)
 

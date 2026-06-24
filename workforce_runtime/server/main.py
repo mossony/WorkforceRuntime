@@ -18,7 +18,13 @@ from workforce_runtime.evals import (
     run_swe_bench_instance,
 )
 from workforce_runtime.org_designer import OrgDesigner, OrgDesignRequest, organization_to_yaml
-from workforce_runtime.server.demo import run_sample_repo_fix_demo, run_simple_status_demo, run_web_research_demo
+from workforce_runtime.server.demo import (
+    run_large_org_scale_demo,
+    run_sample_repo_fix_demo,
+    run_simple_status_demo,
+    run_web_research_demo,
+)
+from workforce_runtime.server.large_task_100 import run_large_task_100_real_llm
 from workforce_runtime.server.runtime import WorkforceRuntime
 from workforce_runtime.storage import load_org_from_yaml
 
@@ -59,12 +65,20 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--org", required=True, type=Path, help="Path to org YAML")
 
     demo_parser = subparsers.add_parser("demo", help="Run a packaged demo")
-    demo_parser.add_argument("name", choices=["sample-repo-fix", "simple-status", "web-research"])
+    demo_parser.add_argument("name", choices=["sample-repo-fix", "simple-status", "web-research", "large-org-scale", "large-task-100"])
     demo_parser.add_argument(
         "--workspace",
         type=Path,
         default=None,
         help="Workspace directory for demo files.",
+    )
+    demo_parser.add_argument("--agent-count", type=int, default=None, help="Agent count for large-org-scale.")
+    demo_parser.add_argument("--active-agent-limit", type=int, default=None, help="Active slot limit for large-org-scale.")
+    demo_parser.add_argument("--plan-path", type=Path, default=None, help="Plan file for large-task-100.")
+    demo_parser.add_argument(
+        "--allow-position-fallback",
+        action="store_true",
+        help="Allow large-task-100 to fall back to plan-derived positions if LLM org design fails.",
     )
 
     dashboard_parser = subparsers.add_parser("dashboard", help="Print the text dashboard")
@@ -253,6 +267,46 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "demo" and args.name == "web-research":
         workspace = args.workspace or Path(str(demo_defaults.get("web_research_workspace") or ".workforce_runtime/demo/web-research"))
         print(run_web_research_demo(args.db, workspace))
+        return
+
+    if args.command == "demo" and args.name == "large-org-scale":
+        large_defaults = demo_defaults.get("large_org_scale", {})
+        workspace = args.workspace or Path(str(large_defaults.get("workspace") or ".workforce_runtime/demo/large-org-scale"))
+        print(
+            run_large_org_scale_demo(
+                args.db,
+                workspace,
+                agent_count=args.agent_count if args.agent_count is not None else int(large_defaults.get("agent_count") or 3000),
+                active_agent_limit=(
+                    args.active_agent_limit
+                    if args.active_agent_limit is not None
+                    else int(large_defaults.get("active_agent_limit") or 20)
+                ),
+                management_model=str(large_defaults.get("management_model") or "openai/gpt-oss-120b:free"),
+                worker_model=str(large_defaults.get("worker_model") or "poolside/laguna-m.1:free"),
+            )
+        )
+        return
+
+    if args.command == "demo" and args.name == "large-task-100":
+        large_defaults = demo_defaults.get("large_task_100", {})
+        workspace = args.workspace or Path(str(large_defaults.get("workspace") or ".workforce_runtime/demo/large-task-100"))
+        result = run_large_task_100_real_llm(
+            args.db,
+            workspace,
+            plan_path=args.plan_path or Path(str(large_defaults.get("plan_path") or "examples/Large_Task_100_v0.md")),
+            max_agents=args.agent_count if args.agent_count is not None else int(large_defaults.get("agent_count") or 100),
+            active_agent_limit=(
+                args.active_agent_limit
+                if args.active_agent_limit is not None
+                else int(large_defaults.get("active_agent_limit") or 25)
+            ),
+            management_models=[str(item) for item in large_defaults.get("management_models") or []] or None,
+            worker_models=[str(item) for item in large_defaults.get("worker_models") or []] or None,
+            llm_json_config=large_defaults.get("llm_json"),
+            allow_position_fallback=bool(args.allow_position_fallback),
+        )
+        print(result.model_dump_json(indent=2))
         return
 
     if args.command == "mcp" and args.mcp_command == "serve":

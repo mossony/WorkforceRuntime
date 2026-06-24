@@ -11,6 +11,7 @@ from workforce_runtime.core.system_prompt import generate_system_prompt
 from workforce_runtime.core.task import TaskContract, TaskStatus
 from workforce_runtime.core.task_document import TaskDocument, TaskDocumentType
 from workforce_runtime.core.task_trace import TaskTraceExport
+from workforce_runtime.core.work_queue import WorkItem, WorkItemKind, WorkItemStatus, WorkQueuePolicy
 
 __all__ = [
     "AgentProfile",
@@ -29,5 +30,9 @@ __all__ = [
     "TaskTraceExport",
     "TaskStatus",
     "UsageCost",
+    "WorkItem",
+    "WorkItemKind",
+    "WorkItemStatus",
+    "WorkQueuePolicy",
     "generate_system_prompt",
 ]

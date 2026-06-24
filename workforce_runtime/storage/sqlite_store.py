@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
 from pathlib import Path
 
 from workforce_runtime.core.agent_profile import AgentProfile
@@ -13,15 +12,11 @@ from workforce_runtime.core.report import ReportContract
 from workforce_runtime.core.task import TaskContract
 from workforce_runtime.core.task_document import TaskDocument
 from workforce_runtime.core.task_trace import TaskTraceExport
+from workforce_runtime.core.work_queue import WorkItem, WorkItemStatus
+from workforce_runtime.storage.base import RuntimeStore, SequencedEvent
 
 
-@dataclass(frozen=True)
-class SequencedEvent:
-    sequence: int
-    event: Event
-
-
-class SQLiteStore:
+class SQLiteStore(RuntimeStore):
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         if self.path.parent != Path("."):
@@ -90,6 +85,32 @@ class SQLiteStore:
                 path TEXT NOT NULL,
                 payload TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS work_items (
+                work_item_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                task_id TEXT,
+                priority INTEGER NOT NULL,
+                model TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                idempotency_key TEXT,
+                lease_owner TEXT NOT NULL,
+                lease_until TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_work_items_status_priority
+                ON work_items(status, priority DESC, created_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_work_items_agent
+                ON work_items(agent_id);
+            CREATE INDEX IF NOT EXISTS idx_work_items_task
+                ON work_items(task_id);
+            CREATE INDEX IF NOT EXISTS idx_work_items_idempotency
+                ON work_items(idempotency_key);
 
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
@@ -331,3 +352,81 @@ class SQLiteStore:
     def list_task_trace_exports(self) -> list[TaskTraceExport]:
         rows = self._conn.execute("SELECT payload FROM task_trace_exports ORDER BY exported_at, trace_id").fetchall()
         return [TaskTraceExport.model_validate_json(row["payload"]) for row in rows]
+
+    def save_work_item(self, item: WorkItem) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO work_items (
+                work_item_id, status, kind, agent_id, task_id, priority, model, tool_name,
+                idempotency_key, lease_owner, lease_until, created_at, updated_at, payload
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(work_item_id) DO UPDATE SET
+                status = excluded.status,
+                kind = excluded.kind,
+                agent_id = excluded.agent_id,
+                task_id = excluded.task_id,
+                priority = excluded.priority,
+                model = excluded.model,
+                tool_name = excluded.tool_name,
+                idempotency_key = excluded.idempotency_key,
+                lease_owner = excluded.lease_owner,
+                lease_until = excluded.lease_until,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at,
+                payload = excluded.payload
+            """,
+            (
+                item.work_item_id,
+                item.status,
+                item.kind,
+                item.agent_id,
+                item.task_id,
+                item.priority,
+                item.model,
+                item.tool_name,
+                item.idempotency_key,
+                item.lease_owner,
+                item.lease_until.isoformat() if item.lease_until else None,
+                item.created_at.isoformat(),
+                item.updated_at.isoformat(),
+                item.model_dump_json(),
+            ),
+        )
+        self._conn.commit()
+
+    def get_work_item(self, work_item_id: str) -> WorkItem | None:
+        row = self._conn.execute("SELECT payload FROM work_items WHERE work_item_id = ?", (work_item_id,)).fetchone()
+        if row is None:
+            return None
+        return WorkItem.model_validate_json(row["payload"])
+
+    def get_work_item_by_idempotency_key(self, idempotency_key: str) -> WorkItem | None:
+        row = self._conn.execute(
+            "SELECT payload FROM work_items WHERE idempotency_key = ? ORDER BY created_at DESC LIMIT 1",
+            (idempotency_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return WorkItem.model_validate_json(row["payload"])
+
+    def list_work_items(self, *, status: WorkItemStatus | None = None) -> list[WorkItem]:
+        if status is None:
+            rows = self._conn.execute(
+                """
+                SELECT payload
+                FROM work_items
+                ORDER BY created_at, work_item_id
+                """
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT payload
+                FROM work_items
+                WHERE status = ?
+                ORDER BY priority DESC, created_at, work_item_id
+                """,
+                (status,),
+            ).fetchall()
+        return [WorkItem.model_validate_json(row["payload"]) for row in rows]

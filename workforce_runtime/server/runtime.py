@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,21 +17,34 @@ from workforce_runtime.core import (
     TaskDocument,
     TaskContract,
     TaskStatus,
+    WorkItem,
+    WorkItemKind,
+    WorkQueuePolicy,
     generate_system_prompt,
 )
 from workforce_runtime.core.permissions import DELEGATE_TASK, REPORT, REPORT_TO_HUMAN, SUBMIT_ARTIFACT, Capability
+from workforce_runtime.config.model_failover import choose_agent_replacement_model, is_unavailable_model_error
+from workforce_runtime.config.runtime_config import load_runtime_config
 from workforce_runtime.scheduler.manager_review import ManagerReviewDecision, ManagerReviewPolicy
-from workforce_runtime.storage import SQLiteStore, load_org_from_yaml
+from workforce_runtime.storage import RuntimeStore, RuntimeStoreFactory, load_org_from_yaml, runtime_store_factory
 
 
 class WorkforceRuntime:
-    def __init__(self, db_path: str | Path = ".workforce_runtime/runtime.sqlite") -> None:
+    def __init__(
+        self,
+        db_path: str | Path = ".workforce_runtime/runtime.sqlite",
+        *,
+        store: RuntimeStore | None = None,
+        store_factory: RuntimeStoreFactory | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
-        self.store = SQLiteStore(self.db_path)
+        self._owns_store = store is None
+        self.store = store or (store_factory or runtime_store_factory("sqlite"))(self.db_path)
         self.manager_review_policy = ManagerReviewPolicy()
 
     def close(self) -> None:
-        self.store.close()
+        if self._owns_store:
+            self.store.close()
 
     def __enter__(self) -> WorkforceRuntime:
         return self
@@ -57,6 +70,50 @@ class WorkforceRuntime:
 
     def get_agent(self, agent_id: str) -> AgentProfile | None:
         return self.store.get_agent(agent_id)
+
+    def auto_replace_unavailable_agent_model(
+        self,
+        *,
+        agent_id: str,
+        failed_model: str,
+        error: object,
+        task_id: str | None = None,
+        actor_id: str = "runtime",
+    ) -> AgentProfile | None:
+        if not bool(load_runtime_config().get("model_failover", {}).get("enabled", True)):
+            return None
+        if not is_unavailable_model_error(error):
+            return None
+        agent = self.store.get_agent(agent_id)
+        company = self.store.get_company()
+        if agent is None or company is None:
+            return None
+        if agent.model != failed_model:
+            return agent
+        replacement = choose_agent_replacement_model(agent, failed_model=failed_model)
+        if not replacement:
+            self.record_event(
+                event_type="agent_model_auto_replace_failed",
+                actor_id=actor_id,
+                task_id=task_id,
+                payload={"agent_id": agent_id, "failed_model": failed_model, "error": str(error)[:1000]},
+            )
+            return None
+        updated = agent.model_copy(update={"model": replacement})
+        updated = updated.model_copy(update={"system_prompt": generate_system_prompt(company, updated)})
+        self.store.save_agent(updated)
+        self.record_event(
+            event_type="agent_model_auto_replaced",
+            actor_id=actor_id,
+            task_id=task_id,
+            payload={
+                "agent_id": agent_id,
+                "old_model": failed_model,
+                "new_model": replacement,
+                "error": str(error)[:1000],
+            },
+        )
+        return updated
 
     def create_task(
         self,
@@ -399,6 +456,272 @@ class WorkforceRuntime:
         )
         self._refresh_related_task_trace_exports(artifact.task_id)
 
+    def enqueue_work_item(
+        self,
+        *,
+        actor_id: str,
+        agent_id: str,
+        kind: WorkItemKind,
+        task_id: str | None = None,
+        payload: dict[str, object] | None = None,
+        priority: int = 0,
+        model: str = "",
+        tool_name: str = "",
+        idempotency_key: str | None = None,
+        max_attempts: int = 3,
+    ) -> WorkItem:
+        agent = self.store.get_agent(agent_id)
+        if agent is None:
+            raise KeyError(f"agent not found: {agent_id}")
+        if task_id is not None:
+            self.require_task_access(actor_id, task_id)
+        if idempotency_key:
+            existing = self.store.get_work_item_by_idempotency_key(idempotency_key)
+            if existing is not None and not existing.is_terminal():
+                self.record_event(
+                    event_type="work_item_deduplicated",
+                    actor_id=actor_id,
+                    task_id=task_id,
+                    payload={"work_item_id": existing.work_item_id, "idempotency_key": idempotency_key},
+                )
+                return existing
+
+        item_payload = payload or {}
+        resolved_model = model or (agent.model if kind in {"llm_request", "worker_run"} else "")
+        resolved_tool = tool_name or str(item_payload.get("tool_name") or "")
+        now = _utc_now()
+        item = WorkItem(
+            work_item_id=f"work_{uuid4().hex[:12]}",
+            kind=kind,
+            agent_id=agent_id,
+            task_id=task_id,
+            payload=item_payload,
+            priority=priority,
+            model=resolved_model,
+            tool_name=resolved_tool,
+            idempotency_key=idempotency_key,
+            max_attempts=max_attempts,
+            created_at=now,
+            updated_at=now,
+        )
+        self.store.save_work_item(item)
+        self.record_event(
+            event_type="work_item_enqueued",
+            actor_id=actor_id,
+            task_id=task_id,
+            payload=_work_item_event_payload(item),
+        )
+        return item
+
+    def claim_work_items(
+        self,
+        *,
+        lease_owner: str,
+        limit: int = 1,
+        policy: WorkQueuePolicy | dict[str, object] | None = None,
+        now: datetime | None = None,
+    ) -> list[WorkItem]:
+        if limit <= 0:
+            return []
+        queue_policy = _queue_policy(policy)
+        effective_now = now or _utc_now()
+        self.release_expired_work_item_leases(now=effective_now)
+
+        items = self.store.list_work_items()
+        active = [item for item in items if item.is_active(effective_now)]
+        active_agents = {item.agent_id for item in active}
+        active_kind_counts = _queue_counts(active, "kind")
+        active_model_counts = _queue_counts(active, "model")
+        active_tool_counts = _queue_counts(active, "tool_name")
+
+        claimed: list[WorkItem] = []
+        queued = sorted(
+            [item for item in items if item.status == "queued"],
+            key=lambda item: (-item.priority, item.created_at, item.work_item_id),
+        )
+        for item in queued:
+            if len(claimed) >= limit:
+                break
+            if item.attempts >= item.max_attempts:
+                failed = item.model_copy(
+                    update={
+                        "status": "failed",
+                        "error": "max attempts exhausted before claim",
+                        "updated_at": effective_now,
+                    }
+                )
+                self.store.save_work_item(failed)
+                self.record_event(
+                    event_type="work_item_failed",
+                    actor_id=lease_owner,
+                    task_id=failed.task_id,
+                    payload={**_work_item_event_payload(failed), "error": failed.error},
+                )
+                continue
+            if not queue_policy.allow_same_agent_parallel and item.agent_id in active_agents:
+                continue
+            if item.agent_id not in active_agents and len(active_agents) >= queue_policy.max_active_agents:
+                continue
+            if not _under_limit(active_kind_counts.get(item.kind, 0), queue_policy.per_kind_limits.get(item.kind, 0)):
+                continue
+            if item.model and not _under_limit(active_model_counts.get(item.model, 0), queue_policy.per_model_limits.get(item.model, 0)):
+                continue
+            if item.tool_name and not _under_limit(active_tool_counts.get(item.tool_name, 0), queue_policy.per_tool_limits.get(item.tool_name, 0)):
+                continue
+
+            leased = item.model_copy(
+                update={
+                    "status": "leased",
+                    "lease_owner": lease_owner,
+                    "leased_at": effective_now,
+                    "lease_until": effective_now + timedelta(seconds=queue_policy.lease_seconds),
+                    "attempts": item.attempts + 1,
+                    "updated_at": effective_now,
+                }
+            )
+            self.store.save_work_item(leased)
+            claimed.append(leased)
+            active.append(leased)
+            active_agents.add(leased.agent_id)
+            active_kind_counts[leased.kind] = active_kind_counts.get(leased.kind, 0) + 1
+            if leased.model:
+                active_model_counts[leased.model] = active_model_counts.get(leased.model, 0) + 1
+            if leased.tool_name:
+                active_tool_counts[leased.tool_name] = active_tool_counts.get(leased.tool_name, 0) + 1
+            self.record_event(
+                event_type="work_item_claimed",
+                actor_id=lease_owner,
+                task_id=leased.task_id,
+                payload=_work_item_event_payload(leased),
+            )
+        return claimed
+
+    def complete_work_item(
+        self,
+        work_item_id: str,
+        *,
+        actor_id: str,
+        result: dict[str, object] | None = None,
+    ) -> WorkItem:
+        item = self._require_work_item(work_item_id)
+        now = _utc_now()
+        completed = item.model_copy(
+            update={
+                "status": "completed",
+                "completed_at": now,
+                "updated_at": now,
+                "result": result or {},
+                "lease_owner": "",
+                "leased_at": None,
+                "lease_until": None,
+            }
+        )
+        self.store.save_work_item(completed)
+        self.record_event(
+            event_type="work_item_completed",
+            actor_id=actor_id,
+            task_id=completed.task_id,
+            payload={**_work_item_event_payload(completed), "result": _clip_payload(result or {})},
+        )
+        return completed
+
+    def fail_work_item(
+        self,
+        work_item_id: str,
+        *,
+        actor_id: str,
+        error: str,
+        retry: bool = True,
+    ) -> WorkItem:
+        item = self._require_work_item(work_item_id)
+        now = _utc_now()
+        should_retry = retry and item.attempts < item.max_attempts
+        update = {
+            "status": "queued" if should_retry else "failed",
+            "error": _clip_event_text(error),
+            "updated_at": now,
+            "lease_owner": "",
+            "leased_at": None,
+            "lease_until": None,
+        }
+        failed = item.model_copy(update=update)
+        self.store.save_work_item(failed)
+        event_type = "work_item_requeued" if should_retry else "work_item_failed"
+        self.record_event(
+            event_type=event_type,
+            actor_id=actor_id,
+            task_id=failed.task_id,
+            payload={**_work_item_event_payload(failed), "error": failed.error},
+        )
+        return failed
+
+    def cancel_work_item(self, work_item_id: str, *, actor_id: str, reason: str = "") -> WorkItem:
+        item = self._require_work_item(work_item_id)
+        now = _utc_now()
+        cancelled = item.model_copy(
+            update={
+                "status": "cancelled",
+                "error": _clip_event_text(reason),
+                "updated_at": now,
+                "lease_owner": "",
+                "leased_at": None,
+                "lease_until": None,
+            }
+        )
+        self.store.save_work_item(cancelled)
+        self.record_event(
+            event_type="work_item_cancelled",
+            actor_id=actor_id,
+            task_id=cancelled.task_id,
+            payload={**_work_item_event_payload(cancelled), "reason": _clip_event_text(reason)},
+        )
+        return cancelled
+
+    def release_expired_work_item_leases(self, *, now: datetime | None = None) -> list[WorkItem]:
+        effective_now = now or _utc_now()
+        released: list[WorkItem] = []
+        for item in self.store.list_work_items(status="leased"):
+            if item.lease_until is None or item.lease_until > effective_now:
+                continue
+            update = {
+                "status": "queued" if item.attempts < item.max_attempts else "failed",
+                "lease_owner": "",
+                "leased_at": None,
+                "lease_until": None,
+                "updated_at": effective_now,
+                "error": "lease expired",
+            }
+            released_item = item.model_copy(update=update)
+            self.store.save_work_item(released_item)
+            released.append(released_item)
+            self.record_event(
+                event_type="work_item_lease_expired" if released_item.status == "queued" else "work_item_failed",
+                actor_id=item.lease_owner or "runtime",
+                task_id=item.task_id,
+                payload=_work_item_event_payload(released_item),
+            )
+        return released
+
+    def work_queue_snapshot(self) -> dict[str, object]:
+        items = self.store.list_work_items()
+        status_counts = _queue_counts(items, "status")
+        kind_counts = _queue_counts(items, "kind")
+        active_items = [item for item in items if item.is_active()]
+        return {
+            "total": len(items),
+            "status_counts": status_counts,
+            "kind_counts": kind_counts,
+            "active_agents": len({item.agent_id for item in active_items}),
+            "active_items": len(active_items),
+            "items": [item.model_dump(mode="json") for item in items],
+        }
+
+    def _require_work_item(self, work_item_id: str) -> WorkItem:
+        item = self.store.get_work_item(work_item_id)
+        if item is None:
+            raise KeyError(f"work item not found: {work_item_id}")
+        return item
+
     def record_event(
         self,
         *,
@@ -465,6 +788,34 @@ class WorkforceRuntime:
         )
         self._refresh_related_task_trace_exports(task_id)
         return event
+
+    def record_provider_session(
+        self,
+        *,
+        provider: str,
+        provider_session_id: str,
+        run_id: str,
+        task_id: str,
+        actor_id: str,
+        workspace: str,
+        resume_command: str,
+        worker_type: str = "",
+        metadata: dict[str, object] | None = None,
+    ) -> Event:
+        return self.record_event(
+            event_type="provider_session_registered",
+            actor_id=actor_id,
+            task_id=task_id,
+            payload={
+                "provider": provider,
+                "provider_session_id": provider_session_id,
+                "run_id": run_id,
+                "workspace": workspace,
+                "resume_command": resume_command,
+                "worker_type": worker_type,
+                "metadata": metadata or {},
+            },
+        )
 
     def record_agent_run_started(
         self,
@@ -1261,6 +1612,65 @@ def _clip_event_text(text: str, limit: int = 4000) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 20] + "\n...[truncated]..."
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _queue_policy(policy: WorkQueuePolicy | dict[str, object] | None) -> WorkQueuePolicy:
+    if policy is None:
+        return WorkQueuePolicy()
+    if isinstance(policy, WorkQueuePolicy):
+        return policy
+    return WorkQueuePolicy.model_validate(policy)
+
+
+def _queue_counts(items: list[WorkItem], attr: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = str(getattr(item, attr, "") or "")
+        if not value:
+            continue
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _under_limit(current: int, limit: int) -> bool:
+    return limit <= 0 or current < limit
+
+
+def _work_item_event_payload(item: WorkItem) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "work_item_id": item.work_item_id,
+        "kind": item.kind,
+        "agent_id": item.agent_id,
+        "status": item.status,
+        "priority": item.priority,
+        "attempts": item.attempts,
+        "max_attempts": item.max_attempts,
+    }
+    if item.task_id:
+        payload["task_id"] = item.task_id
+    if item.model:
+        payload["model"] = item.model
+    if item.tool_name:
+        payload["tool_name"] = item.tool_name
+    if item.lease_owner:
+        payload["lease_owner"] = item.lease_owner
+    if item.lease_until:
+        payload["lease_until"] = item.lease_until.isoformat()
+    return payload
+
+
+def _clip_payload(payload: dict[str, object], *, limit: int = 500) -> dict[str, object]:
+    clipped: dict[str, object] = {}
+    for key, value in payload.items():
+        if isinstance(value, str):
+            clipped[key] = _clip_event_text(value, limit=limit)
+        else:
+            clipped[key] = value
+    return clipped
 
 
 def _merge_limited(existing: list[str], incoming: list[str], *, limit: int) -> list[str]:

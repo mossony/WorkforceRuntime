@@ -5,7 +5,7 @@ import json
 import pytest
 
 import workforce_runtime.llm.openrouter as openrouter
-from workforce_runtime.llm import OpenRouterClient, extract_json_object
+from workforce_runtime.llm import NvidiaClient, OpenRouterClient, extract_json_object
 
 
 def test_extract_json_object_handles_inline_fenced_json() -> None:
@@ -50,3 +50,82 @@ def test_stream_raises_clear_error_when_only_reasoning(monkeypatch: pytest.Monke
             messages=[{"role": "user", "content": "Return JSON."}],
             stream=True,
         )
+
+
+def test_nvidia_client_uses_provider_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+
+    def fake_urlopen(request: object, timeout: int) -> FakeResponse:
+        captured["url"] = request.full_url
+        captured["headers"] = dict(request.header_items())
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(openrouter, "urlopen", fake_urlopen)
+
+    client = NvidiaClient(
+        api_key="test",
+        timeout_seconds=5,
+        default_extra_body={"chat_template_kwargs": {"thinking": False}},
+    )
+    response = client.chat(
+        model="nvidia/test-model",
+        messages=[{"role": "user", "content": "hello"}],
+        max_tokens=16384,
+        response_format={"type": "json_object"},
+    )
+
+    assert response.content == "ok"
+    assert captured["url"] == "https://integrate.api.nvidia.com/v1/chat/completions"
+    assert captured["timeout"] == 5
+    assert captured["body"] == {
+        "model": "nvidia/test-model",
+        "messages": [{"role": "user", "content": "hello"}],
+        "temperature": 0.2,
+        "max_tokens": 16384,
+        "chat_template_kwargs": {"thinking": False},
+    }
+    assert "response_format" not in captured["body"]
+    assert captured["headers"]["Authorization"] == "Bearer test"
+    assert "HTTP-Referer" not in captured["headers"]
+    assert "X-Title" not in captured["headers"]
+
+
+def test_openrouter_client_enables_required_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+
+    def fake_urlopen(request: object, timeout: int) -> FakeResponse:
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return FakeResponse()
+
+    monkeypatch.setattr(openrouter, "urlopen", fake_urlopen)
+
+    client = OpenRouterClient(api_key="test", timeout_seconds=5)
+    client.chat(
+        model="openai/gpt-oss-120b:free",
+        messages=[{"role": "user", "content": "hello"}],
+        reasoning=False,
+    )
+
+    assert captured["body"]["reasoning"] == {"enabled": True}

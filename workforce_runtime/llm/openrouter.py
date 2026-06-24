@@ -9,21 +9,26 @@ from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from workforce_runtime.config.model_registry import model_capabilities
 from workforce_runtime.config.runtime_config import load_runtime_config
 
 
 OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
+NVIDIA_CHAT_COMPLETIONS_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 
 
 @dataclass(frozen=True)
-class OpenRouterResponse:
+class OpenAICompatibleResponse:
     content: str
     raw: dict[str, Any]
     usage: dict[str, Any]
     reasoning_details: Any = None
 
 
-class OpenRouterClient:
+OpenRouterResponse = OpenAICompatibleResponse
+
+
+class OpenAICompatibleClient:
     def __init__(
         self,
         *,
@@ -31,14 +36,25 @@ class OpenRouterClient:
         base_url: str | None = None,
         timeout_seconds: int | None = None,
         api_key_env: str | None = None,
+        provider_config_key: str = "openrouter",
+        provider_name: str | None = None,
+        default_extra_body: dict[str, Any] | None = None,
     ) -> None:
-        config = load_runtime_config().get("openrouter", {})
+        config = load_runtime_config().get(provider_config_key, {})
         env_key = api_key_env or str(config.get("api_key_env") or "OPENROUTER_API_KEY")
         self.api_key = api_key or os.environ.get(env_key, "")
-        self.base_url = base_url or str(config.get("chat_completions_url") or OPENROUTER_CHAT_COMPLETIONS_URL)
+        default_base_url = NVIDIA_CHAT_COMPLETIONS_URL if provider_config_key == "nvidia" else OPENROUTER_CHAT_COMPLETIONS_URL
+        self.base_url = base_url or str(config.get("chat_completions_url") or default_base_url)
         self.timeout_seconds = timeout_seconds if timeout_seconds is not None else int(config.get("timeout_seconds") or 90)
-        self.http_referer = str(config.get("http_referer") or "https://github.com/openai/workforce-runtime")
-        self.x_title = str(config.get("x_title") or "Workforce Runtime")
+        self.api_key_env = env_key
+        self.provider_name = provider_name or provider_config_key
+        self.default_reasoning = bool(config.get("reasoning_enabled", True))
+        self.response_format_enabled = bool(config.get("response_format_enabled", True))
+        self.http_referer = str(config.get("http_referer") or "")
+        self.x_title = str(config.get("x_title") or "")
+        self.default_extra_body = dict(config.get("extra_body") or {})
+        if default_extra_body:
+            self.default_extra_body.update(default_extra_body)
 
     def is_configured(self) -> bool:
         return bool(self.api_key.strip())
@@ -50,15 +66,16 @@ class OpenRouterClient:
         messages: list[dict[str, Any]],
         temperature: float = 0.2,
         max_tokens: int | None = None,
-        reasoning: bool = True,
+        reasoning: bool | None = None,
         stream: bool = False,
         response_format: dict[str, Any] | None = None,
         on_delta: Callable[[str], None] | None = None,
         extra_body: dict[str, Any] | None = None,
-    ) -> OpenRouterResponse:
+    ) -> OpenAICompatibleResponse:
         if not self.is_configured():
-            raise RuntimeError("OPENROUTER_API_KEY is not configured")
+            raise RuntimeError(f"{self.api_key_env} is not configured")
 
+        capabilities = model_capabilities(model) or {}
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -66,13 +83,23 @@ class OpenRouterClient:
         }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
-        if reasoning:
+        effective_reasoning = self.default_reasoning if reasoning is None else reasoning
+        if bool(capabilities.get("requires_reasoning")):
+            effective_reasoning = True
+        if effective_reasoning:
             body["reasoning"] = {"enabled": True}
         if stream:
             body["stream"] = True
             body["stream_options"] = {"include_usage": True}
-        if response_format is not None:
+        if response_format is not None and (
+            self.response_format_enabled or bool(capabilities.get("supports_response_format"))
+        ):
             body["response_format"] = response_format
+        model_extra_body = dict(capabilities.get("default_extra_body") or {})
+        if self.default_extra_body:
+            body.update(self.default_extra_body)
+        if model_extra_body:
+            body.update(model_extra_body)
         if extra_body:
             body.update(extra_body)
 
@@ -81,28 +108,31 @@ class OpenRouterClient:
         return self._chat_once(body)
 
     def _request(self, body: dict[str, Any]) -> Request:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        if self.http_referer:
+            headers["HTTP-Referer"] = self.http_referer
+        if self.x_title:
+            headers["X-Title"] = self.x_title
         return Request(
             self.base_url,
             data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": self.http_referer,
-                "X-Title": self.x_title,
-            },
+            headers=headers,
             method="POST",
         )
 
-    def _chat_once(self, body: dict[str, Any]) -> OpenRouterResponse:
+    def _chat_once(self, body: dict[str, Any]) -> OpenAICompatibleResponse:
         try:
             with urlopen(self._request(body), timeout=self.timeout_seconds) as response:
                 raw = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"OpenRouter request failed: HTTP {exc.code}: {detail}") from exc
+            raise RuntimeError(f"{self.provider_name} request failed: HTTP {exc.code}: {detail}") from exc
 
         message = raw.get("choices", [{}])[0].get("message") or {}
-        return OpenRouterResponse(
+        return OpenAICompatibleResponse(
             content=str(message.get("content") or ""),
             raw=raw,
             usage=dict(raw.get("usage") or {}),
@@ -114,7 +144,7 @@ class OpenRouterClient:
         body: dict[str, Any],
         *,
         on_delta: Callable[[str], None] | None,
-    ) -> OpenRouterResponse:
+    ) -> OpenAICompatibleResponse:
         chunks: list[str] = []
         last_payload: dict[str, Any] = {}
         usage: dict[str, Any] = {}
@@ -124,7 +154,7 @@ class OpenRouterClient:
                 deadline = time.monotonic() + self.timeout_seconds
                 for raw_line in response:
                     if time.monotonic() > deadline:
-                        raise TimeoutError(f"OpenRouter stream exceeded {self.timeout_seconds} seconds")
+                        raise TimeoutError(f"{self.provider_name} stream exceeded {self.timeout_seconds} seconds")
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line or not line.startswith("data:"):
                         continue
@@ -137,7 +167,7 @@ class OpenRouterClient:
                         continue
                     last_payload = payload
                     if payload.get("error"):
-                        raise RuntimeError(f"OpenRouter stream returned error: {_format_openrouter_error(payload['error'])}")
+                        raise RuntimeError(f"{self.provider_name} stream returned error: {_format_provider_error(payload['error'])}")
                     if isinstance(payload.get("usage"), dict):
                         usage = dict(payload["usage"])
                     choices = payload.get("choices") or []
@@ -152,7 +182,7 @@ class OpenRouterClient:
                             on_delta(str(text))
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"OpenRouter stream failed: HTTP {exc.code}: {detail}") from exc
+            raise RuntimeError(f"{self.provider_name} stream failed: HTTP {exc.code}: {detail}") from exc
 
         if not chunks:
             finish_reason = ""
@@ -160,16 +190,48 @@ class OpenRouterClient:
             if choices:
                 finish_reason = str(choices[0].get("finish_reason") or choices[0].get("native_finish_reason") or "")
             raise RuntimeError(
-                "OpenRouter stream returned no assistant content"
+                f"{self.provider_name} stream returned no assistant content"
                 f" (finish_reason={finish_reason or 'unknown'}, reasoning_chars={reasoning_chars})."
                 " Increase max_tokens, disable/reduce reasoning for structured JSON tasks, or retry without streaming."
             )
 
-        return OpenRouterResponse(
+        return OpenAICompatibleResponse(
             content="".join(chunks),
             raw=last_payload,
             usage=usage or dict(last_payload.get("usage") or {}),
         )
+
+
+class OpenRouterClient(OpenAICompatibleClient):
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("provider_config_key", "openrouter")
+        kwargs.setdefault("provider_name", "OpenRouter")
+        super().__init__(**kwargs)
+
+
+class NvidiaClient(OpenAICompatibleClient):
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("provider_config_key", "nvidia")
+        kwargs.setdefault("provider_name", "NVIDIA")
+        super().__init__(**kwargs)
+
+
+class RoutedLLMClient:
+    def __init__(self, *, clients: dict[str, OpenAICompatibleClient] | None = None) -> None:
+        self.clients = clients or {
+            "openrouter": OpenRouterClient(),
+            "nvidia": NvidiaClient(),
+        }
+
+    def is_configured(self) -> bool:
+        return any(client.is_configured() for client in self.clients.values())
+
+    def chat(self, *, model: str, **kwargs: Any) -> OpenAICompatibleResponse:
+        provider = str((model_capabilities(model) or {}).get("provider") or "openrouter")
+        client = self.clients.get(provider)
+        if client is None:
+            raise RuntimeError(f"no LLM client configured for provider: {provider}")
+        return client.chat(model=model, **kwargs)
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -245,7 +307,7 @@ def _first_balanced_json_object(text: str) -> str:
     return ""
 
 
-def _format_openrouter_error(error: Any) -> str:
+def _format_provider_error(error: Any) -> str:
     if isinstance(error, dict):
         message = str(error.get("message") or error.get("error") or error)
         code = error.get("code")

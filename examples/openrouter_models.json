@@ -23,6 +23,52 @@
       "supports_reasoning": true,
       "supports_tools": true,
       "source": "https://openrouter.ai/poolside/laguna-xs.2:free"
+    },
+    "openrouter/owl-alpha": {
+      "provider": "openrouter",
+      "context_window_tokens": 1048756,
+      "max_output_tokens": null,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "supports_response_format": false,
+      "source": "https://openrouter.ai/openrouter/owl-alpha"
+    },
+    "nvidia/nemotron-3-ultra-550b-a55b:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 1000000,
+      "max_output_tokens": null,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "supports_response_format": false,
+      "source": "https://openrouter.ai/nvidia/nemotron-3-ultra-550b-a55b:free"
+    },
+    "nvidia/nemotron-3-super-120b-a12b:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 1000000,
+      "max_output_tokens": null,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "supports_response_format": false,
+      "source": "https://openrouter.ai/nvidia/nemotron-3-super-120b-a12b:free"
+    },
+    "cohere/north-mini-code:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 256000,
+      "max_output_tokens": 64000,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "supports_response_format": true,
+      "source": "https://openrouter.ai/cohere/north-mini-code:free"
+    },
+    "openai/gpt-oss-20b:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 131072,
+      "max_output_tokens": null,
+      "supports_reasoning": true,
+      "requires_reasoning": true,
+      "supports_tools": true,
+      "supports_response_format": true,
+      "source": "https://openrouter.ai/openai/gpt-oss-20b:free"
     }
   }
 }

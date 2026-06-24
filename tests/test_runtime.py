@@ -133,6 +133,46 @@ def test_runtime_records_streaming_agent_output(tmp_path: Path) -> None:
     assert "agent_run_finished" in event_types
 
 
+def test_runtime_auto_replaces_unavailable_agent_model_and_prompt(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    db_path = tmp_path / "runtime.sqlite"
+    with WorkforceRuntime(db_path) as runtime:
+        runtime.initialize_org(EXAMPLE_ORG)
+        agent = runtime.get_agent("engineering_manager")
+        assert agent is not None
+        runtime.store.save_agent(
+            agent.model_copy(
+                update={
+                    "model": "deepseek-ai/deepseek-v4-pro",
+                    "system_prompt": "Assigned model: deepseek-ai/deepseek-v4-pro.",
+                }
+            )
+        )
+        task = runtime.create_task(
+            title="Recover bad model",
+            objective="Trigger unavailable model recovery.",
+            assign_to="engineering_manager",
+        )
+
+        updated = runtime.auto_replace_unavailable_agent_model(
+            agent_id="engineering_manager",
+            failed_model="deepseek-ai/deepseek-v4-pro",
+            error='HTTP 400: {"detail":"Function id abc: DEGRADED function cannot be invoked"}',
+            task_id=task.task_id,
+        )
+
+        assert updated is not None
+        assert updated.model == "openai/gpt-oss-120b:free"
+        stored = runtime.get_agent("engineering_manager")
+        assert stored is not None
+        assert stored.model == "openai/gpt-oss-120b:free"
+        assert "Assigned model: openai/gpt-oss-120b:free." in stored.system_prompt
+        assert "deepseek-ai/deepseek-v4-pro" not in stored.system_prompt
+        events = [event for event in runtime.store.list_events() if event.event_type == "agent_model_auto_replaced"]
+        assert events[-1].payload["old_model"] == "deepseek-ai/deepseek-v4-pro"
+        assert events[-1].payload["new_model"] == "openai/gpt-oss-120b:free"
+
+
 def test_runtime_exports_complete_task_trace_snapshot(tmp_path: Path) -> None:
     db_path = tmp_path / "runtime.sqlite"
     artifact_path = tmp_path / "design.md"
@@ -166,6 +206,15 @@ def test_runtime_exports_complete_task_trace_snapshot(tmp_path: Path) -> None:
             status="completed",
             usage={"total_tokens": 42},
         )
+        work_item = runtime.enqueue_work_item(
+            actor_id="system",
+            agent_id="codex_worker",
+            kind="llm_request",
+            task_id=task.task_id,
+            payload={"prompt": "draft design note"},
+            model="openai/gpt-oss-120b:free",
+        )
+        runtime.claim_work_items(lease_owner="trace-test", limit=1)
         runtime.upsert_task_document(
             actor_id="codex_worker",
             task_id=task.task_id,
@@ -217,6 +266,9 @@ def test_runtime_exports_complete_task_trace_snapshot(tmp_path: Path) -> None:
     assert any(event["event_type"] == "agent_output" for event in payload["events"])
     assert any(run["run_id"] == "codex_run_001" and run["usage"]["total_tokens"] == 42 for run in payload["agent_runs"])
     assert payload["documents"][0]["doc_type"] == "requirements"
+    assert payload["summary"]["work_item_count"] == 1
+    assert payload["work_items"][0]["work_item_id"] == work_item.work_item_id
+    assert payload["work_items"][0]["status"] == "leased"
     assert payload["reports"][0]["report_id"] == "report_001"
     assert payload["artifacts"][0]["path"] == str(artifact_path)
     assert any(file["path"] == str(artifact_path) and "Trace this file." in file["content"] for file in payload["files"])

@@ -11,6 +11,9 @@ htmlcov/
 dist/
 build/
 artifacts/
+.agents/
+.claude/
+.cursor/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

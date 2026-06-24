@@ -235,6 +235,27 @@ Expected arguments:
 
 - `agent_id`
 
+### Queue coordination tools
+
+`enqueue_work`, `claim_work`, `complete_work`, `fail_work`, and `get_work_queue` provide a persistent scheduler queue for `llm_request`, `tool_call`, and `worker_run` items.
+
+`enqueue_work` expected arguments:
+
+- `from_agent_id`
+- `agent_id`
+- `kind`: `llm_request`, `tool_call`, or `worker_run`
+- optional `task_id`
+- optional `payload`
+- optional `priority`
+- optional `model`
+- optional `tool_name`
+- optional `idempotency_key`
+- optional `max_attempts`
+
+`claim_work` claims queued items under a policy with `max_active_agents`, `lease_seconds`, `per_kind_limits`, `per_model_limits`, and `per_tool_limits`.
+
+`complete_work` marks a leased item completed and stores a result. `fail_work` either requeues the item or marks it failed when attempts are exhausted. `get_work_queue` returns queue counts and item state for dashboards or dispatchers.
+
 ## Minimal JSON-RPC Call
 
 ```json
