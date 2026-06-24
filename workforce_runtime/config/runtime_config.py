@@ -134,6 +134,19 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
         "per_tool_limits": {},
         "allow_same_agent_parallel": False,
     },
+    "execution": {
+        "mode": "full_access",
+        "sandbox": {
+            "provider": "anthropic_sandbox_runtime",
+            "command_prefix": ["srt", "--settings", "{settings_path}"],
+            "settings_path": "examples/sandbox_runtime_settings.json",
+            "worker_extra_args": {
+                "codex": [],
+                "claude_code": ["--dangerously-skip-permissions"],
+                "claude_code_interactive": [],
+            },
+        },
+    },
     "icons": {
         "codex": {"label": "Codex", "image_url": "/assets/agent-icons/codex.png"},
         "claude": {"label": "Claude", "image_url": ""},
@@ -279,6 +292,7 @@ def dashboard_config_from_runtime(config: dict[str, Any]) -> dict[str, Any]:
         "activity": copy.deepcopy(config.get("activity", {})),
         "summaries": copy.deepcopy(config.get("summaries", {})),
         "queue": copy.deepcopy(config.get("queue", {})),
+        "execution": copy.deepcopy(config.get("execution", {})),
         "icons": copy.deepcopy(config.get("icons", {})),
         "models": copy.deepcopy(config.get("models", {})),
     }

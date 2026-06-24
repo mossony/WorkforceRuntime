@@ -32,6 +32,34 @@ Recommended adapter behavior:
 - Collect `git diff`, test logs, and any declared artifact paths.
 - Treat nonzero exit status, missing report, timeout, or missing artifact as runtime-level failures.
 
+## Execution Isolation
+
+Workforce Runtime has two global execution modes in `workforce_runtime_config.json`:
+
+- `full_access`: preserve the current worker behavior.
+- `sandbox`: prepend `execution.sandbox.command_prefix` to the whole Codex or
+  Claude Code worker process.
+
+The default sandbox template is:
+
+```json
+{
+  "execution": {
+    "mode": "sandbox",
+    "sandbox": {
+      "command_prefix": ["srt", "--settings", "{settings_path}"],
+      "settings_path": "examples/sandbox_runtime_settings.json"
+    }
+  }
+}
+```
+
+This controls the process tree, including native shell/file tools and MCP server
+subprocesses that the CLI launches. It does not make every native Codex tool call
+visible to Workforce Runtime. Per-tool queueing is available for Workforce MCP
+tools; native Codex or Claude Code tools require process sandboxing, disabling
+native tools, or replacing them with queued MCP tools.
+
 ## Model Provider
 
 Codex ignores provider/auth settings in project-local `.codex/config.toml`, so

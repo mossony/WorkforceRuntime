@@ -10,6 +10,7 @@ from workforce_runtime.config import load_runtime_config
 from workforce_runtime.server.runtime import WorkforceRuntime
 from workforce_runtime.storage import FileStore
 from workforce_runtime.workers.process_runner import run_process_streaming
+from workforce_runtime.workers.sandbox import apply_process_sandbox, record_sandbox_application, worker_extra_args
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,7 @@ def codex_resume_command(
 ) -> list[str]:
     return [
         executable,
+        *worker_extra_args("codex"),
         "--profile",
         profile,
         *(["-m", str(model)] if model else []),
@@ -98,7 +100,7 @@ def claude_resume_command(
     session_id: str,
     message: str,
 ) -> list[str]:
-    return [executable, "-p", "--resume", session_id, "--output-format", "json", message]
+    return [executable, *worker_extra_args("claude_code"), "-p", "--resume", session_id, "--output-format", "json", message]
 
 
 def latest_provider_session(
@@ -267,6 +269,15 @@ def resume_provider_session(
             message=message,
         )
 
+    sandboxed = apply_process_sandbox(command, worker_type=provider, workspace=workspace)
+    record_sandbox_application(
+        runtime,
+        application=sandboxed,
+        run_id=run_id,
+        task_id=effective_task_id,
+        agent_id=agent_id,
+    )
+
     runtime.record_event(
         event_type="provider_session_resume_requested",
         actor_id=from_agent_id,
@@ -277,10 +288,12 @@ def resume_provider_session(
             "provider_session_id": session.provider_session_id,
             "message": message,
             "run_id": run_id,
+            "execution_mode": sandboxed.metadata.get("execution_mode", "full_access"),
+            "sandbox_applied": sandboxed.applied,
         },
     )
     streamed = run_process_streaming(
-        command=command,
+        command=sandboxed.command,
         cwd=workspace,
         env=None,
         timeout_seconds=timeout_seconds,

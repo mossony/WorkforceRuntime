@@ -175,6 +175,25 @@
     "per_tool_limits": {},
     "allow_same_agent_parallel": false
   },
+  "execution": {
+    "mode": "full_access",
+    "sandbox": {
+      "provider": "anthropic_sandbox_runtime",
+      "command_prefix": [
+        "srt",
+        "--settings",
+        "{settings_path}"
+      ],
+      "settings_path": "examples/sandbox_runtime_settings.json",
+      "worker_extra_args": {
+        "codex": [],
+        "claude_code": [
+          "--dangerously-skip-permissions"
+        ],
+        "claude_code_interactive": []
+      }
+    }
+  },
   "icons": {
     "codex": {
       "label": "Codex",

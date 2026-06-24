@@ -10,6 +10,7 @@ from workforce_runtime.core import Artifact, ReportContract, TaskContract, Usage
 from workforce_runtime.storage import FileStore
 from workforce_runtime.workers.base import RuntimeContext, WorkerRun
 from workforce_runtime.workers.process_runner import run_process_streaming
+from workforce_runtime.workers.sandbox import apply_process_sandbox, record_sandbox_application, worker_extra_args
 from workforce_runtime.workers.session_resume import (
     consume_queued_steers_for_resume,
     extract_codex_session_id,
@@ -62,6 +63,7 @@ class CodexWorker:
 
         command = [
             self.codex_executable,
+            *worker_extra_args("codex"),
             "--profile",
             self.profile,
             *(["-m", str(self.model)] if self.model else []),
@@ -77,9 +79,17 @@ class CodexWorker:
             str(final_message_path),
             prompt,
         ]
+        sandboxed = apply_process_sandbox(command, worker_type="codex", workspace=workspace)
+        record_sandbox_application(
+            runtime_context.runtime,
+            application=sandboxed,
+            run_id=run_id,
+            task_id=task.task_id,
+            agent_id=runtime_context.agent_id,
+        )
 
         streamed = run_process_streaming(
-            command=command,
+            command=sandboxed.command,
             cwd=workspace,
             env=None,
             timeout_seconds=self.timeout_seconds,
@@ -107,6 +117,10 @@ class CodexWorker:
             "model": self.model or "",
             "approval_policy": self.approval_policy,
             "sandbox_mode": self.sandbox_mode,
+            "execution_mode": sandboxed.metadata.get("execution_mode", "full_access"),
+            "sandbox_applied": sandboxed.applied,
+            "sandbox_command_prefix": sandboxed.metadata.get("sandbox_command_prefix", []),
+            "sandbox_settings_path": sandboxed.metadata.get("sandbox_settings_path", ""),
             "timeout_seconds": self.timeout_seconds or "",
         }
         if provider_session_id:

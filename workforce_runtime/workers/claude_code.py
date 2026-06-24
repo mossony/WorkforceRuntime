@@ -10,6 +10,7 @@ from workforce_runtime.core import Artifact, ReportContract, TaskContract, Usage
 from workforce_runtime.storage import FileStore
 from workforce_runtime.workers.base import RuntimeContext, WorkerRun
 from workforce_runtime.workers.process_runner import run_process_streaming
+from workforce_runtime.workers.sandbox import apply_process_sandbox, record_sandbox_application, worker_extra_args
 from workforce_runtime.workers.session_resume import (
     consume_queued_steers_for_resume,
     extract_claude_session_id,
@@ -54,14 +55,23 @@ class ClaudeCodeWorker:
 
         command = [
             self.claude_executable,
+            *worker_extra_args("claude_code"),
             "-p",
             prompt,
             "--output-format",
             "json",
         ]
+        sandboxed = apply_process_sandbox(command, worker_type="claude_code", workspace=workspace)
+        record_sandbox_application(
+            runtime_context.runtime,
+            application=sandboxed,
+            run_id=run_id,
+            task_id=task.task_id,
+            agent_id=runtime_context.agent_id,
+        )
 
         streamed = run_process_streaming(
-            command=command,
+            command=sandboxed.command,
             cwd=workspace,
             env=None,
             timeout_seconds=self.timeout_seconds,
@@ -84,6 +94,10 @@ class ClaudeCodeWorker:
         resume_command = f"claude -p --resume {provider_session_id}" if provider_session_id else ""
         session_metadata: dict[str, object] = {
             "executable": self.claude_executable,
+            "execution_mode": sandboxed.metadata.get("execution_mode", "full_access"),
+            "sandbox_applied": sandboxed.applied,
+            "sandbox_command_prefix": sandboxed.metadata.get("sandbox_command_prefix", []),
+            "sandbox_settings_path": sandboxed.metadata.get("sandbox_settings_path", ""),
             "timeout_seconds": self.timeout_seconds or "",
         }
         if provider_session_id:
