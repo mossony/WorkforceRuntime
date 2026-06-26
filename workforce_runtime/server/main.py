@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--db",
         type=Path,
         default=None,
-        help="Path to the Workforce Runtime SQLite database.",
+        help="Runtime database identifier. Use a .sqlite path for SQLite, or omit for configured MySQL.",
     )
     subparsers = parser.add_subparsers(dest="command")
 
@@ -187,7 +187,7 @@ def main(argv: list[str] | None = None) -> None:
     demo_defaults = runtime_config.get("demos", {})
     benchmark_defaults = runtime_config.get("benchmarks", {})
     swe_defaults = benchmark_defaults.get("swe_bench", {})
-    args.db = args.db or Path(str(runtime_defaults.get("db_path") or ".workforce_runtime/runtime.sqlite"))
+    args.db = args.db or Path(str(runtime_defaults.get("db_path") or "workforce_runtime"))
 
     if args.command == "org" and args.org_command == "print":
         organization = load_org_from_yaml(args.path)

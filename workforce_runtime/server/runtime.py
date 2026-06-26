@@ -7,6 +7,10 @@ from uuid import uuid4
 
 from workforce_runtime.core import (
     AgentExperience,
+    AgentInboxInterruptMode,
+    AgentInboxItem,
+    AgentInboxItemKind,
+    AgentInboxItemStatus,
     AgentPersonalProfile,
     AgentProfile,
     Artifact,
@@ -25,6 +29,7 @@ from workforce_runtime.core import (
 from workforce_runtime.core.permissions import DELEGATE_TASK, REPORT, REPORT_TO_HUMAN, SUBMIT_ARTIFACT, Capability
 from workforce_runtime.config.model_failover import choose_agent_replacement_model, is_unavailable_model_error
 from workforce_runtime.config.runtime_config import load_runtime_config
+from workforce_runtime.inbox import RabbitMQAgentInboxQueue
 from workforce_runtime.scheduler.manager_review import ManagerReviewDecision, ManagerReviewPolicy
 from workforce_runtime.storage import RuntimeStore, RuntimeStoreFactory, load_org_from_yaml, runtime_store_factory
 
@@ -32,14 +37,18 @@ from workforce_runtime.storage import RuntimeStore, RuntimeStoreFactory, load_or
 class WorkforceRuntime:
     def __init__(
         self,
-        db_path: str | Path = ".workforce_runtime/runtime.sqlite",
+        db_path: str | Path = "workforce_runtime",
         *,
         store: RuntimeStore | None = None,
         store_factory: RuntimeStoreFactory | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self._owns_store = store is None
-        self.store = store or (store_factory or runtime_store_factory("sqlite"))(self.db_path)
+        runtime_config = load_runtime_config()
+        backend = str(runtime_config.get("runtime", {}).get("store_backend") or "mysql")
+        if _looks_like_sqlite_path(db_path):
+            backend = "sqlite"
+        self.store = store or (store_factory or runtime_store_factory(backend))(db_path)
         self.manager_review_policy = ManagerReviewPolicy()
 
     def close(self) -> None:
@@ -61,6 +70,14 @@ class WorkforceRuntime:
         for agent in organization.agents:
             self.store.save_agent(agent)
             self._ensure_agent_personal_profile(agent.id, updated_by="system")
+        try:
+            self._agent_inbox_queue().ensure_agent_queues(agent.id for agent in organization.agents)
+        except Exception as exc:
+            self.record_event(
+                event_type="agent_inbox_queue_initialize_failed",
+                actor_id="system",
+                payload={"error": _clip_event_text(str(exc))},
+            )
         self.record_event(
             event_type="org_initialized",
             actor_id="system",
@@ -164,6 +181,14 @@ class WorkforceRuntime:
                 task_id=task.task_id,
                 payload={"assigned_to": assign_to},
             )
+            self.enqueue_agent_inbox_item(
+                agent_id=assign_to,
+                kind="assignment",
+                from_agent_id=assigned_by,
+                task_id=task.task_id,
+                payload={"task_id": task.task_id, "title": task.title, "objective": task.objective},
+                idempotency_key=f"assignment:{task.task_id}:{assign_to}",
+            )
         return task
 
     def assign_task(self, task_id: str, *, assign_to: str, assigned_by: str = "human") -> TaskContract:
@@ -183,7 +208,196 @@ class WorkforceRuntime:
             task_id=task.task_id,
             payload={"assigned_to": assign_to},
         )
+        self.enqueue_agent_inbox_item(
+            agent_id=assign_to,
+            kind="assignment",
+            from_agent_id=assigned_by,
+            task_id=task.task_id,
+            payload={"task_id": task.task_id, "title": task.title, "objective": task.objective},
+            idempotency_key=f"assignment:{task.task_id}:{assign_to}",
+        )
         return task
+
+    def enqueue_agent_inbox_item(
+        self,
+        *,
+        agent_id: str,
+        kind: AgentInboxItemKind,
+        from_agent_id: str = "runtime",
+        task_id: str | None = None,
+        thread_id: str = "",
+        payload: dict[str, object] | None = None,
+        priority: int = 0,
+        interrupt_mode: AgentInboxInterruptMode = "none",
+        idempotency_key: str | None = None,
+        max_attempts: int = 3,
+    ) -> AgentInboxItem:
+        if self.store.get_agent(agent_id) is None:
+            raise KeyError(f"agent not found: {agent_id}")
+        if task_id is not None:
+            self.require_task_access(from_agent_id, task_id)
+        if idempotency_key:
+            for existing in self.store.list_agent_inbox_items(agent_id=agent_id):
+                if existing.payload.get("idempotency_key") == idempotency_key and not existing.is_terminal():
+                    return existing
+        item = AgentInboxItem(
+            inbox_item_id=f"inbox_{uuid4().hex[:12]}",
+            agent_id=agent_id,
+            kind=kind,
+            task_id=task_id,
+            from_agent_id=from_agent_id,
+            thread_id=thread_id,
+            priority=priority,
+            interrupt_mode=interrupt_mode,
+            payload={**(payload or {}), **({"idempotency_key": idempotency_key} if idempotency_key else {})},
+            max_attempts=max_attempts,
+        )
+        self.store.save_agent_inbox_item(item)
+        self.record_event(
+            event_type="agent_inbox_item_enqueued",
+            actor_id=from_agent_id,
+            task_id=task_id,
+            payload=_agent_inbox_event_payload(item),
+        )
+        self._publish_agent_inbox_item(item)
+        return item
+
+    def claim_agent_inbox_items(
+        self,
+        *,
+        agent_id: str,
+        lease_owner: str,
+        limit: int = 1,
+        actor_id: str | None = None,
+    ) -> list[AgentInboxItem]:
+        if self.store.get_agent(agent_id) is None:
+            raise KeyError(f"agent not found: {agent_id}")
+        self.require_agent_inbox_access(actor_id or lease_owner, agent_id)
+        claimed: list[AgentInboxItem] = []
+        try:
+            broker_items = self._agent_inbox_queue().claim(agent_id=agent_id, limit=limit)
+        except Exception as exc:
+            self.record_event(
+                event_type="agent_inbox_claim_failed",
+                actor_id=lease_owner,
+                payload={"agent_id": agent_id, "error": _clip_event_text(str(exc))},
+            )
+            broker_items = []
+        now = _utc_now()
+        for broker_item in broker_items:
+            stored = self.store.get_agent_inbox_item(broker_item.inbox_item_id) or broker_item
+            if stored.status != "queued":
+                continue
+            leased = stored.model_copy(
+                update={
+                    "status": "leased",
+                    "leased_at": now,
+                    "lease_owner": lease_owner,
+                    "attempts": stored.attempts + 1,
+                    "updated_at": now,
+                }
+            )
+            self.store.save_agent_inbox_item(leased)
+            self.record_event(
+                event_type="agent_inbox_item_claimed",
+                actor_id=lease_owner,
+                task_id=leased.task_id,
+                payload=_agent_inbox_event_payload(leased),
+            )
+            claimed.append(leased)
+        return claimed
+
+    def complete_agent_inbox_item(
+        self,
+        inbox_item_id: str,
+        *,
+        actor_id: str,
+        result: dict[str, object] | None = None,
+    ) -> AgentInboxItem:
+        item = self.require_agent_inbox_item(inbox_item_id)
+        self.require_agent_inbox_access(actor_id, item.agent_id)
+        now = _utc_now()
+        completed = item.model_copy(
+            update={
+                "status": "completed",
+                "completed_at": now,
+                "updated_at": now,
+                "payload": {**item.payload, **({"result": result} if result is not None else {})},
+            }
+        )
+        self.store.save_agent_inbox_item(completed)
+        self.record_event(
+            event_type="agent_inbox_item_completed",
+            actor_id=actor_id,
+            task_id=completed.task_id,
+            payload=_agent_inbox_event_payload(completed),
+        )
+        return completed
+
+    def fail_agent_inbox_item(
+        self,
+        inbox_item_id: str,
+        *,
+        actor_id: str,
+        error: str,
+        retry: bool = True,
+    ) -> AgentInboxItem:
+        item = self.require_agent_inbox_item(inbox_item_id)
+        self.require_agent_inbox_access(actor_id, item.agent_id)
+        now = _utc_now()
+        should_retry = retry and item.attempts < item.max_attempts
+        failed = item.model_copy(
+            update={
+                "status": "queued" if should_retry else "failed",
+                "lease_owner": "",
+                "leased_at": None,
+                "error": error,
+                "updated_at": now,
+            }
+        )
+        self.store.save_agent_inbox_item(failed)
+        self.record_event(
+            event_type="agent_inbox_item_requeued" if should_retry else "agent_inbox_item_failed",
+            actor_id=actor_id,
+            task_id=failed.task_id,
+            payload={**_agent_inbox_event_payload(failed), "error": _clip_event_text(error)},
+        )
+        if should_retry:
+            self._publish_agent_inbox_item(failed)
+        return failed
+
+    def require_agent_inbox_item(self, inbox_item_id: str) -> AgentInboxItem:
+        item = self.store.get_agent_inbox_item(inbox_item_id)
+        if item is None:
+            raise KeyError(f"inbox item not found: {inbox_item_id}")
+        return item
+
+    def list_agent_inbox_items(
+        self,
+        *,
+        agent_id: str | None = None,
+        status: AgentInboxItemStatus | None = None,
+        actor_id: str = "runtime",
+    ) -> list[AgentInboxItem]:
+        if agent_id is not None:
+            self.require_agent_inbox_access(actor_id, agent_id)
+        return self.store.list_agent_inbox_items(agent_id=agent_id, status=status)
+
+    def require_agent_inbox_access(self, actor_id: str, agent_id: str) -> None:
+        if actor_id in {"human", "system", "runtime"}:
+            return
+        if actor_id == agent_id:
+            return
+        if self.store.get_agent(actor_id) is None:
+            raise KeyError(f"agent not found: {actor_id}")
+        if self.is_manager_of(actor_id, agent_id):
+            return
+        self.record_event(
+            event_type="permission_violation",
+            actor_id=actor_id,
+            payload={"capability": "agent_inbox_access", "target_agent_id": agent_id},
+        )
+        raise PermissionError(f"agent {actor_id} cannot access inbox for {agent_id}")
 
     def update_task_status(
         self,
@@ -791,6 +1005,34 @@ class WorkforceRuntime:
             raise KeyError(f"work item not found: {work_item_id}")
         return item
 
+    def _agent_inbox_queue(self) -> RabbitMQAgentInboxQueue:
+        config = load_runtime_config().get("agent_inbox", {})
+        backend = str(config.get("backend") or "rabbitmq")
+        if backend != "rabbitmq":
+            raise ValueError(f"unsupported agent inbox backend: {backend}")
+        rabbitmq_config = config.get("rabbitmq") or {}
+        if not isinstance(rabbitmq_config, dict):
+            raise ValueError("agent_inbox.rabbitmq must be an object")
+        return RabbitMQAgentInboxQueue(rabbitmq_config)
+
+    def _publish_agent_inbox_item(self, item: AgentInboxItem) -> None:
+        try:
+            self._agent_inbox_queue().publish(item)
+        except Exception as exc:
+            self.record_event(
+                event_type="agent_inbox_publish_failed",
+                actor_id="runtime",
+                task_id=item.task_id,
+                payload={**_agent_inbox_event_payload(item), "error": _clip_event_text(str(exc))},
+            )
+            return
+        self.record_event(
+            event_type="agent_inbox_item_published",
+            actor_id="runtime",
+            task_id=item.task_id,
+            payload=_agent_inbox_event_payload(item),
+        )
+
     def record_event(
         self,
         *,
@@ -1086,12 +1328,24 @@ class WorkforceRuntime:
             raise KeyError(f"agent not found: {from_agent_id}")
         if to_agent_id not in {"human", "system", "runtime"} and self.store.get_agent(to_agent_id) is None:
             raise KeyError(f"agent not found: {to_agent_id}")
-        return self.record_event(
+        event = self.record_event(
             event_type="discussion_message",
             actor_id=from_agent_id,
             task_id=task_id,
             payload={"to_agent_id": to_agent_id, "message": message, "thread_id": thread_id},
         )
+        if to_agent_id not in {"human", "system", "runtime"}:
+            self.enqueue_agent_inbox_item(
+                agent_id=to_agent_id,
+                kind="message",
+                from_agent_id=from_agent_id,
+                task_id=task_id,
+                thread_id=thread_id or "",
+                payload={"message": message, "discussion_event_id": event.event_id},
+                priority=1,
+                idempotency_key=f"discussion:{event.event_id}:{to_agent_id}",
+            )
+        return event
 
     def request_tool(
         self,
@@ -1468,11 +1722,23 @@ class WorkforceRuntime:
             task_id=report.task_id,
             payload={"report_id": report_id, "notes": notes},
         )
+        self.record_event(
+            event_type="manager_review_decided",
+            actor_id=reviewer_id,
+            task_id=report.task_id,
+            payload={
+                "report_id": report_id,
+                "decision": review_decision,
+                "notes": notes,
+                "accepted": review_decision == "accept",
+                "final_task_status": task_status,
+            },
+        )
 
         for review_task in self.list_tasks():
             if (
                 review_task.parent_task_id == report.task_id
-                and review_task.context_refs == [f"report:{report_id}"]
+                and f"report:{report_id}" in review_task.context_refs
                 and review_task.status in {"created", "assigned", "in_progress"}
             ):
                 self.update_task_status(review_task.task_id, status="completed", actor_id=reviewer_id)
@@ -1546,9 +1812,22 @@ class WorkforceRuntime:
             task_id=review_task.task_id,
             payload={"report_id": report.report_id, "reviewed_task_id": task.task_id},
         )
-
-        decision = self.manager_review_policy.decide(task=task, report=report)
-        self._apply_manager_review_decision(review_task, task, report, decision)
+        self.enqueue_agent_inbox_item(
+            agent_id=report.to_agent_id,
+            kind="report_review",
+            from_agent_id=report.from_agent_id,
+            task_id=review_task.task_id,
+            payload={
+                "report_id": report.report_id,
+                "review_task_id": review_task.task_id,
+                "reviewed_task_id": task.task_id,
+                "reviewed_task_title": task.title,
+                "summary": report.summary,
+                "status": report.status,
+            },
+            priority=10,
+            idempotency_key=f"report_review:{report.report_id}:{report.to_agent_id}",
+        )
         return review_task
 
     def _apply_manager_review_decision(
@@ -1683,6 +1962,11 @@ def _clip_event_text(text: str, limit: int = 4000) -> str:
     return text[: limit - 20] + "\n...[truncated]..."
 
 
+def _looks_like_sqlite_path(value: str | Path) -> bool:
+    text = str(value)
+    return text.endswith((".sqlite", ".sqlite3", ".db"))
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -1729,6 +2013,29 @@ def _work_item_event_payload(item: WorkItem) -> dict[str, object]:
         payload["lease_owner"] = item.lease_owner
     if item.lease_until:
         payload["lease_until"] = item.lease_until.isoformat()
+    return payload
+
+
+def _agent_inbox_event_payload(item: AgentInboxItem) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "inbox_item_id": item.inbox_item_id,
+        "kind": item.kind,
+        "agent_id": item.agent_id,
+        "from_agent_id": item.from_agent_id,
+        "status": item.status,
+        "priority": item.priority,
+        "interrupt_mode": item.interrupt_mode,
+        "attempts": item.attempts,
+        "max_attempts": item.max_attempts,
+    }
+    if item.task_id:
+        payload["task_id"] = item.task_id
+    if item.thread_id:
+        payload["thread_id"] = item.thread_id
+    if item.lease_owner:
+        payload["lease_owner"] = item.lease_owner
+    if item.payload:
+        payload["payload"] = _clip_payload(item.payload, limit=500)
     return payload
 
 

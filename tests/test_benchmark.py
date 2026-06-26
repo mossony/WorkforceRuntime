@@ -92,6 +92,7 @@ def test_benchmark_case_runs_with_fake_llm_and_scores(tmp_path: Path) -> None:
         token_budget=300000,
     )
 
+    root_task_ids: list[str] = []
     result = run_benchmark_case(
         tmp_path / "runtime.sqlite",
         workspace=tmp_path / "workspace",
@@ -99,10 +100,12 @@ def test_benchmark_case_runs_with_fake_llm_and_scores(tmp_path: Path) -> None:
         use_llm=True,
         judge="llm",
         client=FakeBenchmarkClient(),
+        on_root_task_created=root_task_ids.append,
     )
 
     assert result.ok is True
-    assert result.designed_agent_count == 4
+    assert root_task_ids == [result.root_task_id]
+    assert result.designed_agent_count == 5
     assert result.metrics["artifact_coverage"] == 1.0
     assert any(score.name == "overall" and score.score == 0.86 for score in result.scores)
     assert result.artifacts[0]["type"] == "benchmark_research_summary"

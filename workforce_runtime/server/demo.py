@@ -471,6 +471,8 @@ def run_sample_repo_fix_demo(db_path: Path, workspace: Path) -> str:
                 manager_id="engineering_manager",
             ),
         )
+        for report in runtime.store.list_reports():
+            runtime.review_report(report.report_id, reviewer_id=report.to_agent_id)
 
         reports = runtime.store.list_reports()
         artifacts = runtime.store.list_artifacts()
@@ -669,6 +671,8 @@ def run_web_research_demo(db_path: Path, workspace: Path) -> str:
                 manager_id="engineering_manager",
             ),
         )
+        for report in runtime.store.list_reports():
+            runtime.review_report(report.report_id, reviewer_id=report.to_agent_id)
 
         reports = runtime.store.list_reports()
         artifacts = runtime.store.list_artifacts()

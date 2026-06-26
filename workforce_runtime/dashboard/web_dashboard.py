@@ -69,7 +69,7 @@ def build_web_dashboard_state(
         work_items = [item for item in all_work_items if item.task_id in task_scope]
         events = [event for event in all_events if _event_matches_task_scope(event, task_scope)]
         agent_ids = _agent_ids_for_task_scope(all_agents, tasks, reports, artifacts, events)
-        agents = [agent for agent in all_agents if agent.id in agent_ids]
+        agents = _agents_for_current_company(all_agents, company, required_agent_ids=agent_ids)
     else:
         agents = all_agents
         tasks = all_tasks
@@ -222,6 +222,39 @@ def _agent_ids_for_task_scope(
             ids.add(current.manager_id)
             current = by_id.get(current.manager_id)
     return {agent_id for agent_id in ids if agent_id in by_id}
+
+
+def _agents_for_current_company(
+    agents: list[Any],
+    company: Company,
+    *,
+    required_agent_ids: set[str] | None = None,
+) -> list[Any]:
+    required_agent_ids = required_agent_ids or set()
+    by_id = {agent.id: agent for agent in agents}
+    matched_ids: set[str] = set()
+    mission = (company.mission or "").strip()
+    if mission:
+        mission_marker = f"Company mission: {mission}"
+        matched_ids = {
+            agent.id
+            for agent in agents
+            if mission_marker in (agent.system_prompt or "")
+        }
+
+    if not matched_ids and required_agent_ids:
+        matched_ids = set(required_agent_ids)
+    if not matched_ids:
+        return agents
+
+    ids = set(matched_ids)
+    ids.update(agent_id for agent_id in required_agent_ids if agent_id in by_id)
+    for agent_id in list(ids):
+        current = by_id.get(agent_id)
+        while current is not None and current.manager_id:
+            ids.add(current.manager_id)
+            current = by_id.get(current.manager_id)
+    return [agent for agent in agents if agent.id in ids]
 
 
 def make_web_dashboard_server(
@@ -698,7 +731,7 @@ def make_web_dashboard_server(
         token_budget = _payload_int(payload, "token_budget", int(designed_defaults.get("token_budget") or 600000))
         management_model = str(payload.get("management_model") or designed_defaults.get("management_model") or "openai/gpt-oss-120b:free")
         worker_model = str(payload.get("worker_model") or designed_defaults.get("worker_model") or "poolside/laguna-m.1:free")
-        use_llm = bool(payload.get("use_llm", designed_defaults.get("use_llm", True)))
+        use_llm = bool(payload.get("use_llm", True))
         request = OrgDesignRequest(
             goal=goal,
             company_name=str(payload.get("company_name") or designed_defaults.get("company_name") or "Designed Task Workforce"),
@@ -1117,6 +1150,16 @@ def make_web_dashboard_server(
         reset: bool,
     ) -> None:
         nonlocal designed_task_status
+        def mark_root_task_created(root_task_id: str) -> None:
+            nonlocal designed_task_status
+            with designed_task_lock:
+                if designed_task_status.get("run_id") == run_id:
+                    designed_task_status = {
+                        **designed_task_status,
+                        "root_task_id": root_task_id,
+                        "status": "running",
+                    }
+
         try:
             result = run_benchmark_case(
                 db,
@@ -1128,6 +1171,7 @@ def make_web_dashboard_server(
                 organization_override=organization,
                 llm_json_config=runtime_config.get("benchmarks", {}).get("llm_json"),
                 source_excerpt_chars=int(runtime_config.get("benchmarks", {}).get("source_excerpt_chars", 20000)),
+                on_root_task_created=mark_root_task_created,
             )
             with designed_task_lock:
                 if designed_task_status.get("run_id") == run_id:
@@ -2237,1364 +2281,879 @@ HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Workforce Runtime Dashboard</title>
+  <title>Workforce Runtime</title>
   <link rel="icon" href="data:,">
   <style>
-    :root {
-      color-scheme: light;
-      --bg: #f7f8fa;
-      --panel: #ffffff;
-      --line: #d8dde5;
-      --text: #17202a;
-      --muted: #64748b;
-      --accent: #0f766e;
-      --accent-weak: #e7f4f2;
-      --warn: #b45309;
-      --bad: #b91c1c;
-      --good: #15803d;
-      --shadow: 0 18px 60px rgba(15, 23, 42, 0.16);
-    }
     * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100%; }
     body {
-      margin: 0;
-      background: var(--bg);
-      color: var(--text);
-      font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
+      background: #f4f3f0; color: #1c1b19;
+      -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
     }
     body.detail-open { overflow: hidden; }
-    header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 14px 20px;
-      border-bottom: 1px solid var(--line);
-      background: var(--panel);
-      position: sticky;
-      top: 0;
-      z-index: 2;
-    }
-    h1, h2, h3 { margin: 0; }
-    h1 { font-size: 18px; }
-    h2 { font-size: 13px; text-transform: uppercase; color: var(--muted); letter-spacing: 0; }
-    h3 { font-size: 14px; }
-    button {
-      border: 1px solid var(--line);
-      background: #ffffff;
-      color: var(--text);
-      border-radius: 7px;
-      padding: 6px 9px;
-      cursor: pointer;
-      font: inherit;
-    }
-    button:hover { border-color: var(--accent); color: var(--accent); }
-    main { padding: 16px; display: grid; gap: 12px; }
-    .grid { display: grid; gap: 12px; grid-template-columns: repeat(12, 1fr); }
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 12px;
-      min-width: 0;
-    }
-    .span-3 { grid-column: span 3; }
-    .span-4 { grid-column: span 4; }
-    .span-6 { grid-column: span 6; }
-    .span-8 { grid-column: span 8; }
-    .span-12 { grid-column: span 12; }
-    .metric { font-size: 22px; font-weight: 650; margin-top: 6px; }
-    .muted { color: var(--muted); }
-    .demo-panel {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-    .demo-copy {
-      min-width: 260px;
-      max-width: 760px;
-    }
-    .demo-title {
-      font-weight: 700;
-      margin-bottom: 4px;
-    }
-    .demo-actions {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .task-designer {
-      display: grid;
-      gap: 10px;
-    }
-    .simple-home {
-      min-height: min(560px, calc(100vh - 170px));
-      display: grid;
-      align-content: center;
-      border: 0;
-      background: transparent;
-      padding: clamp(24px, 5vh, 72px) 12px 24px;
-    }
-    .simple-home-inner {
-      width: min(980px, 100%);
-      margin: 0 auto;
-      display: grid;
-      gap: 18px;
-    }
-    .simple-system-line {
-      display: flex;
-      justify-content: center;
-      gap: 8px;
-      flex-wrap: wrap;
-      min-height: 28px;
-    }
-    .simple-prompt-title {
-      text-align: center;
-      font-size: 28px;
-      font-weight: 620;
-      line-height: 1.2;
-      color: #111827;
-      text-wrap: balance;
-    }
-    .simple-composer-shell {
-      border: 1px solid #d8dde5;
-      border-radius: 8px;
-      background: #ffffff;
-      box-shadow: 0 18px 54px rgba(15, 23, 42, 0.12);
-      overflow: hidden;
-    }
-    .simple-composer-main {
-      display: grid;
-      grid-template-columns: 44px minmax(0, 1fr) auto;
-      align-items: end;
-      gap: 8px;
-      padding: 10px;
-    }
-    .icon-button {
-      width: 36px;
-      height: 36px;
-      border-radius: 999px;
-      padding: 0;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 20px;
-      line-height: 1;
-    }
-    #simple-task-goal {
-      min-height: 44px;
-      max-height: 180px;
-      border: 0;
-      padding: 9px 4px;
-      resize: vertical;
-      font-family: inherit;
-      font-size: 16px;
-      line-height: 1.45;
-      outline: none;
-    }
-    #simple-task-goal::placeholder {
-      color: #64748b;
-      opacity: 1;
-    }
-    .simple-composer-actions {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }
-    .simple-composer-actions button {
-      min-height: 36px;
-      white-space: nowrap;
-    }
-    .simple-run-button[hidden] { display: none; }
-    .simple-config-summary-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      flex-wrap: wrap;
-      border-top: 1px solid #eef1f5;
-      padding: 8px 10px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .simple-config-actions {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .simple-config-panel {
-      display: none;
-      border-top: 1px solid #eef1f5;
-      padding: 12px;
-      background: #fbfcfd;
-    }
-    .simple-config-panel.open { display: grid; gap: 12px; }
-    .simple-config-grid {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(140px, 1fr));
-      gap: 10px;
-      align-items: end;
-    }
-    .simple-config-editors {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-    }
-    .simple-config-editors textarea {
-      min-height: 220px;
-    }
-    .simple-draft-shell {
-      display: none;
-      width: min(1180px, 100%);
-      margin: 8px auto 0;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #ffffff;
-      padding: 12px;
-      overflow-x: auto;
-    }
-    .simple-draft-shell.has-draft { display: block; }
-    .simple-task-report {
-      width: min(980px, 100%);
-      margin: 0 auto;
-      display: grid;
-      gap: 8px;
-    }
-    .simple-task-report-card {
-      border: 1px solid #86bdb7;
-      border-radius: 8px;
-      background: #f3fbfa;
-      padding: 12px;
-      display: grid;
-      gap: 8px;
-    }
-    .simple-task-report-text {
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      color: var(--text);
-    }
-    .operation-progress {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fbfcfd;
-      padding: 10px;
-      display: grid;
-      gap: 9px;
-    }
-    .operation-progress.active {
-      border-color: #94d2c9;
-      background: #fcfffe;
-    }
-    .operation-progress-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    .operation-progress-title {
-      font-weight: 700;
-    }
-    .operation-progress-detail {
-      color: var(--muted);
-      font-size: 12px;
-      margin-top: 2px;
-    }
-    .progress-track {
-      height: 7px;
-      overflow: hidden;
-      border-radius: 999px;
-      background: #e2e8f0;
-    }
-    .progress-fill {
-      width: 32%;
-      height: 100%;
-      border-radius: inherit;
-      background: var(--accent);
-      transform: translateX(-105%);
-    }
-    .operation-progress.active .progress-fill {
-      animation: progress-slide 1.25s ease-in-out infinite;
-    }
-    .operation-progress.finished .progress-fill {
-      width: 100%;
-      transform: translateX(0);
-      animation: none;
-      background: var(--good);
-    }
-    .operation-progress.failed .progress-fill {
-      width: 100%;
-      transform: translateX(0);
-      animation: none;
-      background: var(--bad);
-    }
-    .progress-steps {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .progress-step {
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 2px 7px;
-      background: #ffffff;
-    }
-    .progress-step.active {
-      color: var(--accent);
-      border-color: #94d2c9;
-      background: var(--accent-weak);
-      font-weight: 700;
-    }
-    @keyframes progress-slide {
-      0% { transform: translateX(-105%); }
-      55% { transform: translateX(120%); }
-      100% { transform: translateX(120%); }
-    }
-    .form-row {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 8px;
-      align-items: end;
-    }
-    label {
-      display: grid;
-      gap: 4px;
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 600;
-    }
-    input, select, textarea {
-      width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 7px;
-      padding: 7px 9px;
-      color: var(--text);
-      background: #fff;
-      font: inherit;
-    }
-    textarea {
-      min-height: 86px;
-      resize: vertical;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      font-size: 12px;
-    }
-    .config-editor {
-      min-height: 260px;
-    }
-    .draft-org-panel {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fbfcfd;
-      padding: 10px;
-      display: grid;
-      gap: 10px;
-    }
-    .draft-org-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    .draft-org-title {
-      font-weight: 700;
-    }
-    .draft-tree, .draft-children {
-      list-style: none;
-      padding-left: 0;
-      margin: 0;
-    }
-    .draft-children {
-      margin-left: 26px;
-      padding-left: 18px;
-      border-left: 2px solid var(--line);
-    }
-    .draft-node {
-      position: relative;
-      margin: 10px 0;
-    }
-    .draft-children > .draft-node::before {
-      content: "";
-      position: absolute;
-      left: -18px;
-      top: 20px;
-      width: 16px;
-      border-top: 2px solid var(--line);
-    }
-    .draft-card {
-      display: grid;
-      gap: 5px;
-      max-width: 560px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #ffffff;
-      padding: 9px 10px;
-    }
-    .draft-card.executive {
-      border-color: #86bdb7;
-      background: #f3fbfa;
-    }
-    .draft-card.manager {
-      border-color: #9bb9ea;
-      background: #f5f8fe;
-    }
-    .draft-card.worker {
-      border-color: #c4b5fd;
-      background: #faf7ff;
-    }
-    .draft-card.hr {
-      border-color: #f0c27b;
-      background: #fff9ed;
-    }
-    .draft-card-head {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 8px;
-    }
-    .draft-agent-name {
-      font-weight: 700;
-      color: var(--text);
-    }
-    .draft-agent-role, .draft-agent-meta, .draft-agent-responsibilities {
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .simple-draft-shell .draft-tree {
-      display: flex;
-      justify-content: center;
-      min-width: max-content;
-      padding: 8px 12px 0;
-    }
-    .simple-draft-shell .draft-node {
-      position: relative;
-      margin: 0;
-      padding: 0 10px 30px;
-      text-align: center;
-    }
-    .simple-draft-shell .draft-card {
-      width: 240px;
-      text-align: left;
-      margin: 0 auto;
-      position: relative;
-    }
-    .simple-draft-shell .draft-children {
-      position: relative;
-      display: flex;
-      justify-content: center;
-      gap: 4px;
-      margin-left: 0;
-      padding: 34px 0 0;
-      border-left: 0;
-    }
-    .simple-draft-shell .draft-children::before {
-      content: "";
-      position: absolute;
-      top: 16px;
-      left: 24px;
-      right: 24px;
-      border-top: 1px solid #c8d1dc;
-    }
-    .simple-draft-shell .draft-children > .draft-node::before {
-      content: "";
-      position: absolute;
-      top: 16px;
-      left: 50%;
-      height: 18px;
-      border-left: 1px solid #c8d1dc;
-    }
-    .simple-draft-shell .draft-node:has(> .draft-children) > .draft-card::after {
-      content: "";
-      position: absolute;
-      left: 50%;
-      bottom: -31px;
-      height: 30px;
-      border-left: 1px solid #c8d1dc;
-    }
-    .draft-badge {
-      flex: 0 0 auto;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 1px 7px;
-      font-size: 11px;
-      color: var(--muted);
-      background: #f8fafc;
-    }
-    .human-reports {
-      display: grid;
-      gap: 10px;
-    }
-    .human-report-card {
-      border: 1px solid #86bdb7;
-      border-radius: 8px;
-      background: #f3fbfa;
-      padding: 11px 12px;
-      display: grid;
-      gap: 8px;
-    }
-    .human-report-card.requires-decision {
-      border-color: #f0c27b;
-      background: #fff9ed;
-    }
-    .human-report-head {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    .human-report-title {
-      font-weight: 800;
-    }
-    .human-report-meta, .human-report-next {
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .human-report-message {
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      color: var(--text);
-    }
-    .manager-reports {
-      display: grid;
-      gap: 10px;
-    }
-    .manager-report-card {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fbfcfd;
-      padding: 11px 12px;
-      display: grid;
-      gap: 8px;
-    }
-    .manager-report-head {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    .manager-report-title {
-      font-weight: 800;
-    }
-    .manager-report-meta, .manager-report-next, .manager-report-evidence {
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .manager-report-summary {
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      color: var(--text);
-    }
-    .primary-button {
-      background: var(--accent);
-      color: #ffffff;
-      border-color: var(--accent);
-      font-weight: 700;
-    }
-    .primary-button:hover {
-      background: #0b5f59;
-      color: #ffffff;
-    }
-    .primary-button:disabled {
-      opacity: 0.55;
-      cursor: not-allowed;
-    }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
-    th { color: var(--muted); font-weight: 600; font-size: 12px; }
-    .status { font-weight: 650; }
-    .completed, .idle, .finished { color: var(--good); }
-    .failed, .timed_out { color: var(--bad); }
-    .busy, .assigned, .in_progress, .running, .blocked { color: var(--warn); }
-    pre {
-      margin: 8px 0 0;
-      padding: 10px;
-      background: #0f172a;
-      color: #e2e8f0;
-      border-radius: 6px;
-      overflow: auto;
-      max-height: 340px;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font-size: 12px;
-    }
-    .output-line {
-      border-bottom: 1px solid var(--line);
-      padding: 6px 0;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      font-size: 12px;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-    .output-block {
-      border-bottom: 1px solid var(--line);
-      padding: 8px 0;
-      display: grid;
-      gap: 6px;
-    }
-    .output-text {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      font-size: 12px;
-      line-height: 1.45;
-      white-space: pre-wrap;
-      word-break: break-word;
-      color: #263447;
-    }
-    .pill {
-      display: inline-block;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 2px 7px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .header-actions {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }
-    .mode-toggle {
-      display: inline-flex;
-      gap: 3px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 3px;
-      background: #ffffff;
-    }
-    .mode-toggle button {
-      border: 0;
-      border-radius: 6px;
-      padding: 5px 10px;
-      background: transparent;
-      color: var(--muted);
-      font-weight: 700;
-    }
-    .mode-toggle button.active {
-      background: #12312f;
-      color: #ffffff;
-    }
-    .org-toolbar {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 10px;
-    }
-    .org-tree, .org-children {
-      list-style: none;
-      padding-left: 0;
-      margin: 0;
-    }
-    .org-children {
-      margin-left: 18px;
-      padding-left: 14px;
-      border-left: 1px solid var(--line);
-    }
-    .org-node { margin: 10px 0; }
-    .org-placeholder {
-      border: 1px dashed var(--line);
-      border-radius: 8px;
-      color: var(--muted);
-      padding: 8px 10px;
-      background: #fbfcfd;
-    }
-    body.mode-simple .org-toolbar {
-      width: min(1180px, 100%);
-      margin: 0 auto 12px;
-    }
-    body.mode-simple #org-chart {
-      overflow-x: auto;
-      padding: 12px 0 4px;
-    }
-    body.mode-simple .org-tree {
-      display: flex;
-      justify-content: center;
-      min-width: max-content;
-      padding: 8px 12px 0;
-    }
-    body.mode-simple .org-node {
-      position: relative;
-      margin: 0;
-      padding: 0 10px 30px;
-      text-align: center;
-    }
-    body.mode-simple .org-children {
-      position: relative;
-      display: flex;
-      justify-content: center;
-      gap: 4px;
-      margin-left: 0;
-      padding: 34px 0 0;
-      border-left: 0;
-    }
-    body.mode-simple .org-children::before {
-      content: "";
-      position: absolute;
-      top: 16px;
-      left: 24px;
-      right: 24px;
-      border-top: 1px solid #c8d1dc;
-    }
-    body.mode-simple .org-children > .org-node::before {
-      content: "";
-      position: absolute;
-      top: 16px;
-      left: 50%;
-      height: 18px;
-      border-left: 1px solid #c8d1dc;
-    }
-    body.mode-simple .simple-agent-node.has-children::after {
-      content: "";
-      position: absolute;
-      left: 50%;
-      bottom: -31px;
-      height: 30px;
-      border-left: 1px solid #c8d1dc;
-    }
-    body.mode-simple .simple-overflow-node {
-      min-width: 190px;
-      display: flex;
-      align-items: flex-start;
-      justify-content: center;
-    }
-    body.mode-simple .simple-overflow-node .org-placeholder {
-      margin-top: 3px;
-      min-width: 170px;
-      text-align: center;
-      background: #ffffff;
-    }
-    .agent-node {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fbfcfd;
-      padding: 10px;
-      display: grid;
-      gap: 8px;
-    }
-    .agent-node.active { border-color: #94d2c9; background: #fcfffe; }
-    .simple-agent-node {
-      border-color: #d8e1ea;
-      background: #ffffff;
-      box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03);
-      width: 260px;
-      min-height: 134px;
-      text-align: left;
-      position: relative;
-      transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
-      cursor: pointer;
-    }
-    .simple-agent-node.active {
-      border-color: #66b7ad;
-      background: #f4fbfa;
-    }
-    .simple-agent-node:hover {
-      border-color: #94a3b8;
-      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
-      transform: translateY(-1px);
-    }
-    .simple-agent-main {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-      align-items: flex-start;
-    }
-    .simple-agent-role {
-      color: var(--muted);
-      font-size: 12px;
-      margin-top: 2px;
-    }
-    .simple-agent-work {
-      color: #334155;
-      font-size: 12px;
-      white-space: nowrap;
-    }
-    .simple-agent-summary {
-      border: 1px solid #d8e6e3;
-      border-radius: 8px;
-      background: #f8fbfb;
-      padding: 8px 9px;
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      min-width: 0;
-    }
-    .simple-agent-summary .summary-text {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .communication-pulses {
-      min-height: 34px;
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      align-items: center;
-      margin: 0 0 10px;
-    }
-    .communication-pulse {
-      border: 1px solid #84b9b3;
-      border-radius: 8px;
-      background: #f1fbfa;
-      color: #12312f;
-      padding: 7px 9px;
-      font-size: 12px;
-      box-shadow: 0 4px 12px rgba(17, 94, 89, 0.12);
-      animation: pulse-fade 4.5s ease forwards;
-    }
-    .communication-pulse.report {
-      border-color: #9fbce4;
-      background: #f4f8ff;
-      color: #1e3a5f;
-    }
-    .communication-pulse.human {
-      border-color: #deb36b;
-      background: #fff9ed;
-      color: #6d4a11;
-    }
-    @keyframes pulse-fade {
-      0% { transform: translateY(6px); opacity: 0; }
-      12% { transform: translateY(0); opacity: 1; }
-      82% { transform: translateY(0); opacity: 1; }
-      100% { transform: translateY(-4px); opacity: 0; }
-    }
-    body.mode-simple .debug-only { display: none; }
-    body.mode-debug .simple-only { display: none; }
-    body.mode-simple [data-module] { display: none; }
-    body.mode-simple [data-module].module-active { display: block; }
-    body.mode-debug [data-module] { display: block; }
-    body.mode-simple main {
-      gap: 16px;
-      padding: 14px clamp(12px, 3vw, 28px) 40px;
-    }
-    body.mode-simple .module-toggle {
-      display: none;
-    }
-    body.mode-simple #metrics {
-      width: min(980px, 100%);
-      margin: 0 auto;
-      display: flex;
-      gap: 8px;
-      justify-content: center;
-      flex-wrap: wrap;
-    }
-    body.mode-simple #metrics .panel {
-      flex: 0 1 auto;
-      padding: 5px 9px;
-      border-radius: 999px;
-      background: #ffffff;
-      box-shadow: none;
-    }
-    body.mode-simple #metrics h2 {
-      display: inline;
-      text-transform: none;
-      font-size: 12px;
-      margin-right: 5px;
-    }
-    body.mode-simple #metrics .metric {
-      display: inline;
-      font-size: 12px;
-      font-weight: 700;
-      margin: 0;
-    }
-    .module-toggle {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }
-    .module-toggle button.active {
-      background: #111827;
-      color: #fff;
-      border-color: #111827;
-    }
-    .agent-node-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-      align-items: flex-start;
-    }
-    .agent-title {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
-    }
-    .agent-controls {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex: 0 0 auto;
-    }
-    .tree-toggle {
-      width: 30px;
-      height: 30px;
-      padding: 0;
-      font-weight: 800;
-      line-height: 1;
-    }
-    .agent-icon, .agent-icon-fallback {
-      width: 28px;
-      height: 28px;
-      border-radius: 7px;
-      flex: 0 0 auto;
-    }
-    .agent-icon {
-      object-fit: cover;
-      border: 1px solid var(--line);
-      background: #fff;
-    }
-    .agent-icon-fallback {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      border: 1px solid var(--line);
-      background: #e8eef6;
-      color: #243449;
-      font-size: 10px;
-      font-weight: 800;
-      letter-spacing: 0;
-    }
-    .agent-name { font-weight: 700; }
-    .agent-meta {
-      color: var(--muted);
-      font-size: 12px;
-      margin-top: 2px;
-    }
-    .agent-summary {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
-      padding: 8px;
-      border-radius: 7px;
-      background: #eef3f7;
-      color: #1f2f3f;
-    }
-    .agent-summary.active { background: var(--accent-weak); }
-    .summary-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 999px;
-      background: var(--muted);
-      flex: 0 0 auto;
-    }
-    .agent-summary.active .summary-dot { background: var(--accent); }
-    .summary-text {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .summary-text-expanded {
-      overflow: visible;
-      text-overflow: initial;
-      white-space: normal;
-      line-height: 1.45;
-    }
-    .summary-actions {
-      margin-top: 6px;
-      display: flex;
-      justify-content: flex-end;
-    }
-    .activity-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 8px;
-    }
-    .activity-block {
-      min-width: 0;
-      border-top: 1px solid var(--line);
-      padding-top: 6px;
-    }
-    .activity-title {
-      color: var(--muted);
-      font-size: 11px;
-      text-transform: uppercase;
-      margin-bottom: 4px;
-    }
-    .activity-item {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      font-size: 11px;
-      color: #334155;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      border-bottom: 1px solid #edf0f4;
-      padding: 3px 0;
-    }
-    .activity-error {
-      color: #9f1239;
-      background: #fff1f2;
-      border: 1px solid #fecdd3;
-      border-radius: 6px;
-      padding: 4px 6px;
-      margin-bottom: 4px;
-    }
-    .detail-backdrop {
-      position: fixed;
-      inset: 0;
-      background: rgba(15, 23, 42, 0.28);
-      z-index: 5;
-    }
-    .detail-drawer {
-      position: fixed;
-      top: 0;
-      right: 0;
-      height: 100vh;
-      width: min(760px, 94vw);
-      background: var(--panel);
-      border-left: 1px solid var(--line);
-      box-shadow: var(--shadow);
-      z-index: 6;
-      transform: translateX(105%);
-      transition: transform 160ms ease;
-      display: grid;
-      grid-template-rows: auto 1fr;
-    }
-    body.detail-open .detail-drawer { transform: translateX(0); }
-    .detail-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--line);
-    }
-    .detail-body {
-      overflow: auto;
-      padding: 14px 16px 28px;
-      display: grid;
-      gap: 12px;
-    }
-    .detail-section {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 10px;
-    }
-    .detail-section h3 {
-      margin-bottom: 8px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0;
-      font-size: 12px;
-    }
-    .stream-box {
-      max-height: 360px;
-      overflow: auto;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 0 10px;
-      background: #fcfdff;
-    }
-    @media (max-width: 900px) {
-      .span-3, .span-4, .span-6, .span-8 { grid-column: span 12; }
-      .form-row { grid-template-columns: 1fr; }
-      .simple-home { min-height: auto; padding-top: 22px; }
-      .simple-prompt-title { font-size: 23px; }
-      .simple-composer-main {
-        grid-template-columns: 40px minmax(0, 1fr);
-        align-items: end;
-      }
-      .simple-composer-actions {
-        grid-column: 1 / -1;
-        justify-content: flex-end;
-      }
-      .simple-config-grid,
-      .simple-config-editors {
-        grid-template-columns: 1fr;
-      }
-      .simple-agent-node { width: 230px; }
-      .activity-grid { grid-template-columns: 1fr; }
-      header { align-items: flex-start; flex-direction: column; gap: 4px; }
-      .header-actions { justify-content: flex-start; }
-      .simple-agent-main { flex-direction: column; }
-      .simple-agent-work { white-space: normal; }
-      .agent-node-head { flex-direction: column; }
-      .agent-controls { width: 100%; justify-content: space-between; }
-    }
+    /* scrollbar */
+    .wr-scroll::-webkit-scrollbar { width: 9px; }
+    .wr-scroll::-webkit-scrollbar-thumb { background: #d6d2cb; border-radius: 6px; border: 3px solid transparent; background-clip: padding-box; }
+    .wr-scroll::-webkit-scrollbar-thumb:hover { background: #c3beb5; background-clip: padding-box; }
+    .wr-scroll::-webkit-scrollbar-track { background: transparent; }
+    /* animations */
+    @keyframes wrPulse { 0%,100%{opacity:1;transform:scale(1);}50%{opacity:.35;transform:scale(.82);} }
+    @keyframes wrFlow { 0%{background-position:0 0;}100%{background-position:28px 0;} }
+    @keyframes wrSpin { to { transform: rotate(360deg); } }
+    @keyframes pulse-fade { 0%{transform:translateY(6px);opacity:0;}12%{transform:translateY(0);opacity:1;}82%{transform:translateY(0);opacity:1;}100%{transform:translateY(-4px);opacity:0;} }
+    @keyframes progress-slide { 0%{transform:translateX(-105%);}55%{transform:translateX(120%);}100%{transform:translateX(120%);} }
+    /* shell */
+    #app-shell { display:flex; height:100vh; width:100%; overflow:hidden; background:#f4f3f0; }
+    /* sidebar */
+    #sidebar { flex:0 0 264px; width:264px; height:100%; background:#efedea; border-right:1px solid #e3e0da; display:flex; flex-direction:column; transition:width .22s cubic-bezier(.4,0,.2,1),flex-basis .22s cubic-bezier(.4,0,.2,1); }
+    #sidebar.collapsed { width:56px; flex-basis:56px; }
+    .sb-header { padding:14px 14px 10px 14px; display:flex; align-items:center; gap:8px; }
+    .sb-mode-wrap { flex:1; display:flex; position:relative; background:#e4e1db; border:1px solid #dcd8d1; border-radius:9px; padding:3px; }
+    .sb-mode-slider { position:absolute; top:3px; bottom:3px; width:calc(50% - 3px); background:#fff; border-radius:7px; box-shadow:0 1px 2px rgba(28,27,25,.10); transition:transform .22s cubic-bezier(.4,0,.2,1); }
+    .sb-mode-wrap button { position:relative; z-index:1; flex:1; border:0; background:transparent; cursor:pointer; padding:6px 0; font-size:12.5px; font-weight:600; letter-spacing:.01em; font-family:inherit; display:flex; align-items:center; justify-content:center; gap:5px; }
+    .sb-collapse-btn { flex:0 0 auto; width:32px; height:32px; border:1px solid #dcd8d1; background:#e4e1db; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#57544e; font-family:inherit; }
+    .sb-collapse-btn:hover { background:#dcd8d1; }
+    .sb-new-task { margin:2px 14px 12px 14px; width:calc(100% - 28px); border:0; background:#1f1e1b; color:#f6f5f3; border-radius:9px; padding:10px 12px; font-size:13.5px; font-weight:600; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:7px; font-family:inherit; box-shadow:0 1px 2px rgba(28,27,25,.18); }
+    .sb-new-task:hover { background:#000; }
+    .sb-search-wrap { padding:0 14px 8px 14px; }
+    .sb-search { display:flex; align-items:center; background:#e7e4de; border:1px solid #ddd9d2; border-radius:8px; padding:6px 9px; gap:7px; }
+    .sb-search input { flex:1; border:0; background:transparent; outline:none; font-size:12.5px; color:#1c1b19; font-family:inherit; min-width:0; }
+    .sb-search-count { font-size:10.5px; color:#a9a49b; font-variant-numeric:tabular-nums; }
+    .sb-section-title { padding:0 16px 8px 16px; font-size:11px; font-weight:700; color:#6f6a61; text-transform:uppercase; }
+    #sidebar-tasks { flex:1; overflow-y:auto; padding:0 8px 16px 8px; }
+    .task-group-label { padding:12px 8px 5px 8px; font-size:10.5px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:#a39e95; }
+    .task-item { width:100%; text-align:left; border:0; background:transparent; border-radius:7px; padding:7px 9px; margin-bottom:1px; cursor:pointer; display:flex; align-items:center; gap:9px; font-family:inherit; font-size:12.5px; color:#46443e; font-weight:450; }
+    .task-item:hover { background:#e5e2db; }
+    .task-item.selected { background:#e0ddd5; color:#1c1b19; font-weight:600; }
+    .task-item-dot { flex:0 0 auto; width:7px; height:7px; }
+    .task-item-name { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .sb-footer { padding:10px 16px; border-top:1px solid #e3e0da; display:flex; align-items:center; gap:9px; flex-shrink:0; }
+    .sb-avatar { width:26px; height:26px; border-radius:7px; background:#1f1e1b; color:#f6f5f3; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; flex-shrink:0; }
+    .sb-name { font-size:12px; font-weight:600; color:#2a2823; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .sb-sub { font-size:10.5px; color:#a39e95; white-space:nowrap; }
+    /* collapsed sidebar */
+    #sidebar.collapsed .sb-mode-wrap { display:none; }
+    #sidebar.collapsed .sb-new-task-text { display:none; }
+    #sidebar.collapsed .sb-search-wrap { display:none; }
+    #sidebar.collapsed .sb-section-title { display:none; }
+    #sidebar.collapsed .task-group-label { display:none; }
+    #sidebar.collapsed .task-item-name { display:none; }
+    #sidebar.collapsed .sb-name, #sidebar.collapsed .sb-sub { display:none; }
+    #sidebar.collapsed .sb-new-task { width:34px; height:34px; padding:0; border-radius:9px; margin:2px auto 8px auto; }
+    #sidebar.collapsed #sidebar-tasks { align-items:center; display:flex; flex-direction:column; padding:4px 0; gap:4px; }
+    #sidebar.collapsed .task-item { width:32px; height:32px; padding:0; justify-content:center; border-radius:8px; }
+    #sidebar.collapsed .sb-footer { justify-content:center; padding:10px; }
+    /* main */
+    #main { flex:1; min-width:0; height:100%; display:flex; flex-direction:column; }
+    /* status bar */
+    #status-bar { flex:0 0 auto; padding:12px 28px 0 28px; }
+    .sbar-inner { display:flex; align-items:stretch; background:#fff; border:1px solid #e6e3de; border-radius:11px; box-shadow:0 1px 2px rgba(28,27,25,.03); overflow:hidden; }
+    .sbar-company { display:flex; align-items:center; gap:9px; padding:0 16px; border-right:1px solid #eceae5; flex-shrink:0; }
+    .sbar-pulse-wrap { position:relative; display:flex; width:8px; height:8px; }
+    .sbar-pulse { position:absolute; inset:0; border-radius:50%; background:#4a8b63; animation:wrPulse 1.8s ease-in-out infinite; }
+    .sbar-company-name { font-size:12.5px; font-weight:650; color:#2a2823; line-height:1.15; }
+    .sbar-company-sub { font-size:10px; color:#a39e95; letter-spacing:.04em; text-transform:uppercase; }
+    #status-metrics { flex:1; display:flex; align-items:stretch; overflow-x:auto; }
+    .sbar-metric { flex:1; min-width:96px; padding:9px 16px; border-right:1px solid #eceae5; display:flex; flex-direction:column; gap:2px; }
+    .sbar-metric:last-child { border-right:0; }
+    .sbar-metric-lrow { display:flex; align-items:center; gap:6px; }
+    .sbar-metric-dot { width:6px; height:6px; border-radius:50%; }
+    .sbar-metric-label { font-size:10px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:#a39e95; }
+    .sbar-metric-val { font-size:18px; font-weight:660; letter-spacing:-.01em; font-variant-numeric:tabular-nums; transition:color .3s ease; }
+    /* main scroll */
+    #main-scroll { flex:1; overflow-y:auto; padding:0 28px 60px 28px; }
+    #main-content { max-width:860px; margin:0 auto; }
+    /* home title */
+    .home-eyebrow { font-size:11px; font-weight:600; letter-spacing:.13em; text-transform:uppercase; color:#a39e95; margin-bottom:11px; }
+    .home-h1 { margin:0; font-size:27px; font-weight:670; letter-spacing:-.022em; color:#1c1b19; }
+    .home-desc { margin:9px 0 0 0; font-size:14px; color:#76726b; line-height:1.5; max-width:560px; }
+    /* input card */
+    .input-card { background:#fff; border-radius:14px; overflow:hidden; transition:border-color .18s ease,box-shadow .18s ease; }
+    .input-card.idle { border:1.5px solid #e6e3de; box-shadow:0 1px 2px rgba(28,27,25,.03); }
+    .input-card.focused { border:1.5px solid #7fb094; box-shadow:0 0 0 4px rgba(74,139,99,.12),0 1px 2px rgba(28,27,25,.04); }
+    .input-top { display:flex; align-items:flex-start; gap:12px; padding:16px 16px 4px 16px; }
+    .input-attach { flex:0 0 auto; width:34px; height:34px; border-radius:9px; border:1px solid #e4e1db; background:#f7f6f3; color:#57544e; cursor:pointer; display:flex; align-items:center; justify-content:center; margin-top:2px; }
+    .input-attach:hover { background:#efedea; color:#1c1b19; }
+    #designed-task-goal { flex:1; border:0; outline:none; resize:none; background:transparent; font-family:inherit; font-size:15px; line-height:1.55; color:#1c1b19; padding:7px 0; min-height:48px; max-height:200px; }
+    .input-examples { display:flex; flex-wrap:wrap; gap:7px; padding:4px 16px 4px 62px; }
+    .example-chip { border:1px solid #e6e3de; background:#faf9f7; color:#6b675f; border-radius:7px; padding:5px 10px; font-size:12px; cursor:pointer; font-family:inherit; display:flex; align-items:center; gap:6px; }
+    .example-chip:hover { background:#f1efeb; color:#3a3833; border-color:#ddd9d2; }
+    .input-footer { display:flex; align-items:center; justify-content:space-between; padding:10px 16px; margin-top:6px; border-top:1px solid #f0eee9; }
+    .input-footer-left { display:flex; align-items:center; gap:8px; }
+    .input-type-badge { display:inline-flex; align-items:center; gap:6px; background:#f3f1ec; border:1px solid #e6e3de; color:#6b675f; border-radius:7px; padding:5px 9px; font-size:11.5px; font-weight:550; }
+    #input-char-count { font-size:11.5px; color:#b3aea4; }
+    #design-task-config { border:0; background:#3f7d57; color:#fff; border-radius:9px; padding:9px 18px; font-size:13.5px; font-weight:650; cursor:pointer; display:flex; align-items:center; gap:8px; font-family:inherit; box-shadow:0 1px 2px rgba(40,90,60,.22); transition:background .16s ease,opacity .16s ease; }
+    #design-task-config:hover:not(:disabled) { filter:brightness(1.05); }
+    #design-task-config:disabled { opacity:.65; cursor:default; }
+    #design-task-config.running { background:#6f8a78; opacity:.85; }
+    /* pipeline */
+    #pipeline-card { margin-top:14px; border-radius:12px; padding:15px 18px; transition:background .25s ease,border-color .25s ease; }
+    .pipe-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:14px; }
+    .pipe-head-left { display:flex; align-items:flex-start; gap:11px; }
+    .pipe-icon { flex:0 0 auto; width:30px; height:30px; border-radius:8px; display:flex; align-items:center; justify-content:center; margin-top:1px; }
+    .pipe-title { font-size:13.5px; font-weight:640; }
+    .pipe-sub { font-size:12.5px; color:#86827a; margin-top:2px; }
+    .pipe-head-right { display:flex; align-items:center; gap:9px; }
+    .pipe-badge { font-size:10.5px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; border-radius:6px; padding:3px 8px; }
+    .pipe-retry { border-radius:8px; padding:6px 12px; font-size:12.5px; font-weight:600; cursor:pointer; font-family:inherit; display:flex; align-items:center; gap:6px; }
+    .pipe-steps { display:flex; align-items:center; }
+    .pipe-step-wrap { display:flex; align-items:center; }
+    .pipe-step-col { display:flex; flex-direction:column; align-items:center; gap:6px; flex:0 0 auto; }
+    .pipe-dot-outer { width:13px; height:13px; border-radius:50%; border:2px solid; display:flex; align-items:center; justify-content:center; transition:all .25s ease; }
+    .pipe-dot-inner { width:5px; height:5px; border-radius:50%; }
+    .pipe-step-label { font-size:11px; white-space:nowrap; }
+    .pipe-line { flex:1; height:2px; margin:0 8px; margin-bottom:18px; border-radius:2px; }
+    /* reports */
+    #home-reports-section { margin-top:30px; }
+    .reports-hdr { display:flex; align-items:center; justify-content:space-between; margin-bottom:13px; }
+    .reports-hdr-left { display:flex; align-items:center; gap:9px; }
+    .reports-label { font-size:11.5px; font-weight:650; letter-spacing:.08em; text-transform:uppercase; color:#76726b; }
+    #reports-count { font-size:11px; font-weight:600; color:#a39e95; background:#eceae5; border-radius:20px; padding:1px 8px; font-variant-numeric:tabular-nums; }
+    .reports-from { font-size:11.5px; color:#a39e95; }
+    #home-human-reports { display:flex; flex-direction:column; gap:14px; }
+    .no-reports-card { background:#fff; border:1px dashed #ddd9d2; border-radius:12px; padding:46px 24px; text-align:center; }
+    .no-reports-icon { width:46px; height:46px; border-radius:12px; background:#f3f1ec; display:flex; align-items:center; justify-content:center; margin:0 auto 14px auto; color:#b3aea4; }
+    .no-reports-title { font-size:14.5px; font-weight:620; color:#3a3833; }
+    .no-reports-desc { margin:7px auto 0 auto; font-size:13px; line-height:1.55; color:#86827a; max-width:380px; }
+    /* new report card */
+    .wr-report-card { background:#fff; border-radius:12px; box-shadow:0 1px 2px rgba(28,27,25,.04); overflow:hidden; }
+    .wr-rh { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:16px 18px 13px 18px; border-bottom:1px solid #f0eee9; }
+    .wr-rh-left { display:flex; align-items:flex-start; gap:11px; min-width:0; }
+    .wr-avatar { flex:0 0 auto; width:34px; height:34px; border-radius:9px; background:#262420; color:#f3f1ec; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; }
+    .wr-rtitle { font-size:15px; font-weight:660; color:#1c1b19; letter-spacing:-.01em; }
+    .wr-rmeta { display:flex; align-items:center; gap:7px; margin-top:3px; flex-wrap:wrap; font-size:11.5px; color:#86827a; }
+    .wr-rmeta-dot { width:3px; height:3px; border-radius:50%; background:#cfcabf; }
+    .wr-rh-right { display:flex; flex-direction:column; align-items:flex-end; gap:7px; flex-shrink:0; }
+    .wr-sbadge { display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:600; letter-spacing:.03em; border-radius:7px; padding:4px 9px; }
+    .wr-sbadge-dot { width:6px; height:6px; border-radius:50%; }
+    .wr-conf-row { display:flex; align-items:center; gap:7px; }
+    .wr-conf-lbl { font-size:10.5px; color:#a39e95; letter-spacing:.03em; }
+    .wr-conf-bar { width:48px; height:5px; border-radius:3px; background:#eceae5; overflow:hidden; }
+    .wr-conf-fill { height:100%; border-radius:3px; }
+    .wr-conf-val { font-size:11.5px; font-weight:650; color:#3a3833; font-variant-numeric:tabular-nums; }
+    .wr-rbody { padding:15px 18px 6px 18px; }
+    .wr-slabel { font-size:10.5px; font-weight:650; letter-spacing:.07em; text-transform:uppercase; color:#a39e95; margin-bottom:5px; }
+    .wr-summary { margin:0 0 16px 0; font-size:13.5px; line-height:1.62; color:#3a3833; }
+    .wr-risks { display:flex; flex-direction:column; gap:7px; margin-bottom:16px; }
+    .wr-risk { display:flex; align-items:flex-start; gap:9px; }
+    .wr-risk-sev { flex:0 0 auto; margin-top:1px; font-size:9.5px; font-weight:700; letter-spacing:.04em; border-radius:5px; padding:2px 6px; min-width:42px; text-align:center; }
+    .wr-risk-text { font-size:13px; line-height:1.55; color:#46443e; }
+    .wr-rec-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:4px; }
+    .wr-rec-text { margin:0; font-size:13px; line-height:1.55; color:#3a3833; }
+    .wr-next-actions { display:flex; flex-direction:column; gap:5px; }
+    .wr-na { display:flex; align-items:flex-start; gap:8px; font-size:12.5px; line-height:1.5; color:#46443e; }
+    .wr-dec-box { margin:14px 18px 16px 18px; background:#fbf7ee; border:1px solid #ecdcb8; border-radius:10px; padding:13px 15px; }
+    .wr-dec-hdr { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+    .wr-dec-label { font-size:11px; font-weight:650; letter-spacing:.06em; text-transform:uppercase; color:#9a6c25; }
+    .wr-dec-q { margin:0 0 12px 0; font-size:13.5px; line-height:1.55; color:#5a4d30; font-weight:500; }
+    .wr-dec-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    .wr-dec-primary { border:0; background:#3f7d57; color:#fff; border-radius:8px; padding:8px 15px; font-size:12.5px; font-weight:620; cursor:pointer; font-family:inherit; }
+    .wr-dec-alt { border:1px solid #ddd6c4; background:#fff; color:#6b5d3a; border-radius:8px; padding:8px 15px; font-size:12.5px; font-weight:560; cursor:pointer; font-family:inherit; }
+    .wr-dec-alt:hover { background:#f7f1e4; }
+    /* debug panels */
+    #debug-section { display:none; }
+    body.mode-debug #debug-section { display:block; }
+    body.mode-debug .simple-only { display:none; }
+    body.mode-simple .debug-only { display:none; }
+    .panel { background:#fff; border:1px solid #e6e3de; border-radius:10px; padding:16px; margin-bottom:14px; }
+    .panel h2 { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:#76726b; margin:0 0 12px 0; }
+    label { display:grid; gap:4px; color:#76726b; font-size:12px; font-weight:600; }
+    input, select, textarea { width:100%; border:1px solid #e6e3de; border-radius:7px; padding:7px 9px; color:#1c1b19; background:#fff; font:inherit; font-size:13px; }
+    textarea { resize:vertical; }
+    .form-row { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; align-items:end; }
+    button { font:inherit; cursor:pointer; }
+    .pill { display:inline-block; border:1px solid #e6e3de; border-radius:999px; padding:2px 8px; color:#76726b; font-size:12px; background:#faf9f7; }
+    .primary-button { background:#3f7d57; color:#fff; border:0; border-radius:8px; padding:8px 14px; font-size:13px; font-weight:650; }
+    .primary-button:hover { background:#356b4a; }
+    .primary-button:disabled { opacity:.55; cursor:not-allowed; }
+    .muted { color:#86827a; font-size:12px; }
+    .demo-panel { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+    .demo-copy { min-width:260px; }
+    .demo-title { font-weight:700; margin-bottom:4px; font-size:14px; }
+    .demo-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .task-designer { display:grid; gap:10px; }
+    .operation-progress { border:1px solid #e6e3de; border-radius:8px; background:#faf9f7; padding:12px; display:grid; gap:9px; }
+    .operation-progress.active { border-color:#9fd4b7; background:#f6faf7; }
+    .operation-progress-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap; }
+    .operation-progress-title { font-weight:700; font-size:14px; }
+    .operation-progress-detail { color:#76726b; font-size:12px; margin-top:2px; }
+    .progress-track { height:7px; overflow:hidden; border-radius:999px; background:#e6e3de; }
+    .progress-fill { width:32%; height:100%; border-radius:inherit; background:#3f7d57; transform:translateX(-105%); }
+    .operation-progress.active .progress-fill { animation:progress-slide 1.25s ease-in-out infinite; }
+    .operation-progress.finished .progress-fill { width:100%; transform:translateX(0); animation:none; background:#4a8b63; }
+    .operation-progress.failed .progress-fill { width:100%; transform:translateX(0); animation:none; background:#b3524b; }
+    .progress-steps { display:flex; flex-wrap:wrap; gap:6px; color:#76726b; font-size:12px; }
+    .progress-step { border:1px solid #e6e3de; border-radius:999px; padding:2px 8px; background:#fff; }
+    .progress-step.active { color:#3f7d57; border-color:#9fd4b7; background:#ecf4ee; font-weight:700; }
+    .draft-org-panel { border:1px solid #e6e3de; border-radius:8px; background:#faf9f7; padding:12px; display:grid; gap:10px; }
+    .draft-org-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+    .draft-org-title { font-weight:700; }
+    .draft-tree,.draft-children { list-style:none; padding-left:0; margin:0; }
+    .draft-children { margin-left:26px; padding-left:18px; border-left:2px solid #e6e3de; }
+    .draft-node { position:relative; margin:10px 0; }
+    .draft-children>.draft-node::before { content:""; position:absolute; left:-18px; top:20px; width:16px; border-top:2px solid #e6e3de; }
+    .draft-card { display:grid; gap:5px; max-width:560px; border:1px solid #e6e3de; border-radius:8px; background:#fff; padding:9px 10px; }
+    .draft-card.executive { border-color:#86bdb7; background:#f3fbfa; }
+    .draft-card.manager { border-color:#9bb9ea; background:#f5f8fe; }
+    .draft-card.worker { border-color:#c4b5fd; background:#faf7ff; }
+    .draft-card.hr { border-color:#f0c27b; background:#fff9ed; }
+    .draft-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
+    .draft-agent-name { font-weight:700; }
+    .draft-agent-role,.draft-agent-meta,.draft-agent-responsibilities { color:#76726b; font-size:12px; }
+    .draft-badge { flex:0 0 auto; border:1px solid #e6e3de; border-radius:999px; padding:1px 7px; font-size:11px; color:#76726b; background:#f8fafc; }
+    .config-editor { min-height:260px; font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:12px; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th,td { text-align:left; padding:7px 6px; border-bottom:1px solid #e6e3de; vertical-align:top; }
+    th { color:#76726b; font-weight:600; font-size:12px; }
+    h1,h2,h3 { margin:0; }
+    h3 { font-size:14px; }
+    .status { font-weight:650; }
+    .completed,.idle,.finished { color:#3f7d57; }
+    .failed,.timed_out { color:#b3524b; }
+    .busy,.assigned,.in_progress,.running,.blocked { color:#a8742a; }
+    pre { margin:8px 0 0; padding:10px; background:#0f172a; color:#e2e8f0; border-radius:6px; overflow:auto; max-height:340px; white-space:pre-wrap; word-break:break-word; font-size:12px; }
+    .output-block { border-bottom:1px solid #e6e3de; padding:8px 0; display:grid; gap:6px; }
+    .output-text { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:12px; line-height:1.45; white-space:pre-wrap; word-break:break-word; color:#263447; }
+    .org-toolbar { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:10px; }
+    .org-tree,.org-children { list-style:none; padding-left:0; margin:0; }
+    .org-children { margin-left:18px; padding-left:14px; border-left:1px solid #e6e3de; }
+    .org-node { margin:10px 0; }
+    .org-placeholder { border:1px dashed #e6e3de; border-radius:8px; color:#76726b; padding:8px 10px; background:#faf9f7; }
+    .agent-node { border:1px solid #e6e3de; border-radius:8px; background:#faf9f7; padding:10px; display:grid; gap:8px; }
+    .agent-node.active { border-color:#9fd4b7; background:#f6faf7; }
+    .simple-agent-node { border-color:#d8e1ea; background:#fff; box-shadow:0 1px 0 rgba(15,23,42,.03); }
+    .simple-agent-node.active { border-color:#66b7ad; background:#f4fbfa; }
+    .simple-agent-main { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
+    .simple-agent-role { color:#76726b; font-size:12px; margin-top:2px; }
+    .simple-agent-work { color:#334155; font-size:12px; }
+    .simple-agent-summary { border:1px solid #d8e6e3; border-radius:8px; background:#f8fbfb; padding:8px 9px; display:flex; gap:8px; align-items:center; min-width:0; }
+    .simple-agent-summary .summary-text { white-space:normal; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+    .communication-pulses { min-height:34px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:0 0 10px; }
+    .communication-pulse { border:1px solid #84b9b3; border-radius:8px; background:#f1fbfa; color:#12312f; padding:7px 9px; font-size:12px; box-shadow:0 4px 12px rgba(17,94,89,.12); animation:pulse-fade 4.5s ease forwards; }
+    .communication-pulse.report { border-color:#9fbce4; background:#f4f8ff; color:#1e3a5f; }
+    .communication-pulse.human { border-color:#deb36b; background:#fff9ed; color:#6d4a11; }
+    .agent-node-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
+    .agent-title { display:flex; align-items:center; gap:8px; min-width:0; }
+    .agent-controls { display:flex; align-items:center; gap:6px; flex:0 0 auto; }
+    .tree-toggle { width:30px; height:30px; padding:0; font-weight:800; line-height:1; border:1px solid #e6e3de; background:#fff; border-radius:7px; }
+    .agent-icon,.agent-icon-fallback { width:28px; height:28px; border-radius:7px; flex:0 0 auto; }
+    .agent-icon { object-fit:cover; border:1px solid #e6e3de; background:#fff; }
+    .agent-icon-fallback { display:inline-flex; align-items:center; justify-content:center; border:1px solid #e6e3de; background:#e8eef6; color:#243449; font-size:10px; font-weight:800; }
+    .agent-name { font-weight:700; font-size:14px; }
+    .agent-meta { color:#76726b; font-size:12px; margin-top:2px; }
+    .agent-summary { display:flex; align-items:center; gap:8px; min-width:0; padding:8px; border-radius:7px; background:#eef3f7; color:#1f2f3f; }
+    .agent-summary.active { background:#ecf4ee; }
+    .summary-dot { width:8px; height:8px; border-radius:999px; background:#a39e95; flex:0 0 auto; }
+    .agent-summary.active .summary-dot { background:#4a8b63; }
+    .summary-text { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .activity-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; }
+    .activity-block { min-width:0; border-top:1px solid #e6e3de; padding-top:6px; }
+    .activity-title { color:#76726b; font-size:11px; text-transform:uppercase; margin-bottom:4px; }
+    .activity-item { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:11px; color:#334155; white-space:pre-wrap; overflow-wrap:anywhere; border-bottom:1px solid #edf0f4; padding:3px 0; }
+    .activity-error { color:#9f1239; background:#fff1f2; border:1px solid #fecdd3; border-radius:6px; padding:4px 6px; margin-bottom:4px; }
+    .manager-reports { display:grid; gap:10px; }
+    .manager-report-card { border:1px solid #e6e3de; border-radius:8px; background:#faf9f7; padding:11px 12px; display:grid; gap:8px; }
+    .manager-report-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+    .manager-report-title { font-weight:800; }
+    .manager-report-meta,.manager-report-next,.manager-report-evidence { color:#76726b; font-size:12px; }
+    .manager-report-summary { white-space:pre-wrap; overflow-wrap:anywhere; }
+    /* detail drawer */
+    .detail-backdrop { position:fixed; inset:0; background:rgba(28,27,25,.28); z-index:5; }
+    .detail-drawer { position:fixed; top:0; right:0; height:100vh; width:min(760px,94vw); background:#fff; border-left:1px solid #e6e3de; box-shadow:0 18px 60px rgba(28,27,25,.18); z-index:6; transform:translateX(105%); transition:transform 160ms ease; display:grid; grid-template-rows:auto 1fr; }
+    body.detail-open .detail-drawer { transform:translateX(0); }
+    .detail-head { display:flex; justify-content:space-between; gap:12px; padding:14px 16px; border-bottom:1px solid #e6e3de; }
+    .detail-body { overflow:auto; padding:14px 16px 28px; display:grid; gap:12px; }
+    .detail-section { border:1px solid #e6e3de; border-radius:8px; padding:10px; }
+    .detail-section h3 { margin-bottom:8px; color:#76726b; text-transform:uppercase; font-size:12px; }
+    .stream-box { max-height:360px; overflow:auto; border:1px solid #e6e3de; border-radius:6px; padding:0 10px; background:#fcfdff; }
+    .detail-body .agent-summary { background:#f3f1ec; }
+    .detail-body .agent-summary.active { background:#ecf4ee; }
   </style>
 </head>
-<body>
-  <header>
-    <div>
-      <h1>Workforce Runtime</h1>
-      <div class="muted" id="mission"></div>
+<body class="mode-simple">
+<div id="app-shell">
+
+  <!-- SIDEBAR -->
+  <aside id="sidebar">
+    <div class="sb-header">
+      <div class="sb-mode-wrap" id="sb-mode-wrap">
+        <div class="sb-mode-slider" id="sb-mode-slider"></div>
+        <button id="mode-simple" data-action="set-dashboard-mode" data-mode="simple" style="color:#1c1b19;">
+          <span style="width:5px;height:5px;border-radius:50%;background:#4a8b63;display:inline-block;"></span>Simple
+        </button>
+        <button id="mode-debug" data-action="set-dashboard-mode" data-mode="debug" style="color:#8a867f;">Debug</button>
+      </div>
+      <button class="sb-collapse-btn" data-action="toggle-sidebar" title="Collapse">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M6 3.5 2.5 8 6 12.5M13.5 8H3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
     </div>
-    <div class="header-actions">
-      <div class="mode-toggle" aria-label="Dashboard mode">
-        <button data-action="set-dashboard-mode" data-mode="simple" id="mode-simple">Simple</button>
-        <button data-action="set-dashboard-mode" data-mode="debug" id="mode-debug">Debug</button>
+    <button class="sb-new-task" data-action="new-task">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      <span class="sb-new-task-text">New task</span>
+    </button>
+    <div class="sb-search-wrap">
+      <div class="sb-search">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="flex:0 0 auto;color:#8a867f;"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        <input id="sidebar-search-input" placeholder="Search tasks" oninput="onSidebarSearch(this.value)">
+        <span class="sb-search-count" id="sidebar-task-count">0</span>
       </div>
-      <div class="module-toggle" aria-label="Dashboard module">
-        <button data-action="set-dashboard-module" data-module-name="overview" id="module-overview">Overview</button>
-        <button data-action="set-dashboard-module" data-module-name="launch" id="module-launch">Launch</button>
-        <button data-action="set-dashboard-module" data-module-name="config" id="module-config">Config</button>
-        <button data-action="set-dashboard-module" data-module-name="demos" id="module-demos">Demos</button>
-        <button data-action="set-dashboard-module" data-module-name="debug" id="module-debug">Debug</button>
-      </div>
-      <div class="muted">Stream <span id="stream-status">connecting</span> - State <span id="updated">loading</span></div>
     </div>
-  </header>
-  <main>
-    <section class="grid" id="metrics"></section>
-    <section class="grid">
-      <div class="panel span-12" data-module="launch">
-        <div class="task-designer">
-          <div class="demo-panel">
-            <div class="demo-copy">
-              <div class="demo-title">Designed Task Run</div>
-              <div class="muted">Enter a goal, generate an organization/config draft, edit the JSON, then start execution.</div>
+    <div class="sb-section-title">Task history</div>
+    <div class="wr-scroll" id="sidebar-tasks"></div>
+    <div class="sb-footer">
+      <div class="sb-avatar" id="company-initials">WR</div>
+      <div style="min-width:0;">
+        <div class="sb-name" id="mission">Workforce Runtime</div>
+        <div class="sb-sub" id="sidebar-sub">0 agents</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main id="main">
+    <!-- STATUS BAR -->
+    <div id="status-bar">
+      <div class="sbar-inner">
+        <div class="sbar-company">
+          <span class="sbar-pulse-wrap"><span class="sbar-pulse"></span></span>
+          <div>
+            <div class="sbar-company-name" id="company-name-status">Workforce Runtime</div>
+            <div class="sbar-company-sub">Operating</div>
+          </div>
+        </div>
+        <div id="status-metrics"></div>
+      </div>
+    </div>
+
+    <!-- SCROLL -->
+    <div class="wr-scroll" id="main-scroll">
+      <div id="main-content">
+
+        <!-- TITLE -->
+        <div style="padding:48px 0 22px 0;">
+          <div class="home-eyebrow">New directive</div>
+          <h1 class="home-h1">Where should we begin?</h1>
+          <p class="home-desc">Brief your workforce. The organization will design its structure, staff the right agents, execute, and report back with decisions for you.</p>
+        </div>
+
+        <!-- INPUT CARD -->
+        <div class="input-card idle" id="input-card">
+          <div class="input-top">
+            <button class="input-attach" title="Add files or context">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3.2v9.6M3.2 8h9.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+            <textarea id="designed-task-goal" rows="2" placeholder="Describe the goal for your workforce..." oninput="onGoalInput(this)" onfocus="onGoalFocus()" onblur="onGoalBlur()"></textarea>
+          </div>
+          <div class="input-examples">
+            <button class="example-chip" onclick="applyExample('Launch the public beta and operate it for 30 days. Prioritize tenant isolation, cost control, and reliability.')">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M8 1.6 9.9 6l4.5.3-3.5 2.9 1.2 4.4L8 11.2 3.9 13.6l1.2-4.4L1.6 6.3 6.1 6z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+              Launch the public beta
+            </button>
+            <button class="example-chip" onclick="applyExample('Rebuild and reconcile the Q3 revenue model against actuals, then prepare it for board reporting.')">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M8 1.6 9.9 6l4.5.3-3.5 2.9 1.2 4.4L8 11.2 3.9 13.6l1.2-4.4L1.6 6.3 6.1 6z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+              Rebuild the Q3 revenue model
+            </button>
+          </div>
+          <div class="input-footer">
+            <div class="input-footer-left">
+              <span class="input-type-badge">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="2.5" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.3"/></svg>
+                New task
+              </span>
+              <span id="input-char-count"></span>
             </div>
-            <div class="demo-actions">
-              <span class="pill" id="designed-task-status">idle</span>
+            <button id="design-task-config" data-action="design-task-config">
+              <svg id="submit-icon-arrow" width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.5 8h11M9 3.5 13.5 8 9 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <svg id="submit-icon-spin" width="14" height="14" viewBox="0 0 16 16" fill="none" style="display:none;animation:wrSpin .8s linear infinite;"><path d="M8 1.8a6.2 6.2 0 1 1-6.2 6.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+              <span id="submit-label">Design Org</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- PIPELINE -->
+        <div id="pipeline-card"></div>
+
+        <!-- HUMAN REPORTS -->
+        <div id="home-reports-section">
+          <div class="reports-hdr">
+            <div class="reports-hdr-left">
+              <span class="reports-label">Human Reports</span>
+              <span id="reports-count">0</span>
             </div>
+            <span class="reports-from" id="reports-from"></span>
           </div>
-          <label>Task goal
-            <textarea id="designed-task-goal" placeholder="Example: Research the current Python packaging release process and produce a concise implementation plan."></textarea>
-          </label>
-          <div class="form-row">
-            <label>Headcount
-              <input id="designed-task-headcount" type="number" min="3" value="6">
-            </label>
-            <label>Token budget
-              <input id="designed-task-token-budget" type="number" min="0" value="600000">
-            </label>
-            <label>Manager model
-              <input id="designed-task-management-model" value="openai/gpt-oss-120b:free">
-            </label>
-            <label>Worker model
-              <input id="designed-task-worker-model" value="poolside/laguna-m.1:free">
-            </label>
+          <div id="home-human-reports"></div>
+        </div>
+
+        <!-- DEBUG PANELS -->
+        <div id="debug-section">
+          <div class="panel">
+            <div class="org-toolbar"><h2>Org Chart</h2><div class="muted" id="org-summary"></div></div>
+            <div class="communication-pulses" id="communication-pulses"></div>
+            <div id="org-chart"></div>
           </div>
-          <div class="demo-actions">
-            <button class="primary-button" id="design-task-config" data-action="design-task-config">Design Org/Config</button>
-            <button class="primary-button" id="start-designed-task" data-action="start-designed-task">Start Confirmed Task</button>
-            <label style="display:inline-flex;grid-auto-flow:column;align-items:center;gap:6px;width:auto;">
-              <input id="designed-task-use-llm" type="checkbox" checked style="width:auto;"> use LLM
-            </label>
-            <label style="display:inline-flex;grid-auto-flow:column;align-items:center;gap:6px;width:auto;">
-              Filter task
-              <select id="task-filter-select" style="min-width:260px;"><option value="">All tasks</option></select>
-            </label>
-            <button id="export-task-trace" data-action="export-task-trace">Export Selected Task Trace</button>
-            <span class="pill" id="task-trace-export-status">trace idle</span>
+          <div class="panel">
+            <h2>Internal Manager Reports</h2>
+            <div class="manager-reports" id="manager-reports"></div>
           </div>
-          <div class="operation-progress" id="designed-task-progress" aria-live="polite">
-            <div class="operation-progress-head">
-              <div>
-                <div class="operation-progress-title" id="designed-task-progress-title">No design request running.</div>
-                <div class="operation-progress-detail" id="designed-task-progress-detail">Click Design Org/Config to generate a draft organization.</div>
+          <div class="panel"><h2>Agents</h2><table id="agents"></table></div>
+          <div class="panel"><h2>Tasks</h2><table id="tasks"></table></div>
+          <div class="panel"><h2>Agent Runs</h2><table id="runs"></table></div>
+          <div class="panel"><h2>Reports</h2><table id="reports"></table></div>
+          <div class="panel"><h2>Live Agent Output</h2><div id="output"></div></div>
+          <div class="panel"><h2>Replay</h2><pre id="replay"></pre></div>
+          <div class="panel"><h2>Trajectories</h2><pre id="trajectories"></pre></div>
+          <div class="panel">
+            <div class="task-designer">
+              <div class="demo-panel">
+                <div class="demo-copy"><div class="demo-title">Runtime Config</div><div class="muted">Unified Workforce Runtime JSON config.</div></div>
+                <div class="demo-actions">
+                  <button id="load-runtime-config" data-action="load-runtime-config" class="primary-button">Load Config</button>
+                  <button id="save-runtime-config" data-action="save-runtime-config" class="primary-button">Save Config</button>
+                  <span class="pill" id="runtime-config-status">config idle</span>
+                </div>
               </div>
-              <span class="pill" id="designed-task-progress-elapsed">idle</span>
-            </div>
-            <div class="progress-track"><div class="progress-fill"></div></div>
-            <div class="progress-steps" id="designed-task-progress-steps"></div>
-          </div>
-          <div class="draft-org-panel">
-            <div class="draft-org-head">
-              <div class="draft-org-title">Draft Organization Tree</div>
-              <span class="pill" id="draft-org-summary">no draft</span>
-            </div>
-            <div id="draft-org-tree" class="muted">No draft yet.</div>
-          </div>
-          <label>Editable config JSON
-            <textarea class="config-editor" id="designed-task-config-json" spellcheck="false"></textarea>
-          </label>
-        </div>
-      </div>
-      <div class="panel span-12" data-module="config">
-        <div class="task-designer">
-          <div class="demo-panel">
-            <div class="demo-copy">
-              <div class="demo-title">Runtime Config</div>
-              <div class="muted">Unified Workforce Runtime JSON config. Save writes the effective config back to the configured JSON file.</div>
-            </div>
-            <div class="demo-actions">
-              <button id="load-runtime-config" data-action="load-runtime-config">Load Config</button>
-              <button class="primary-button" id="save-runtime-config" data-action="save-runtime-config">Save Config</button>
-              <span class="pill" id="runtime-config-status">config idle</span>
+              <textarea class="config-editor" id="runtime-config-json" spellcheck="false"></textarea>
             </div>
           </div>
-          <textarea class="config-editor" id="runtime-config-json" spellcheck="false"></textarea>
-        </div>
-      </div>
-      <div class="panel span-12" data-module="demos">
-        <div class="demo-panel">
-          <div class="demo-copy">
-            <div class="demo-title">Long RFC Demo</div>
-            <div class="muted">Starts a predefined CEO -> COO -> VP -> Manager -> Worker research workflow in this dashboard database.</div>
-          </div>
-          <div class="demo-actions">
-            <button class="primary-button" id="start-long-rfc-demo" data-action="start-long-rfc-demo">Start Long RFC Demo</button>
-            <span class="pill" id="long-rfc-demo-status">idle</span>
-          </div>
-        </div>
-      </div>
-      <div class="panel span-12" data-module="demos">
-        <div class="demo-panel">
-          <div class="demo-copy">
-            <div class="demo-title">Real LLM Benchmark</div>
-            <div class="muted">Runs org_designer plus OpenRouter manager and worker steps, then scores the run in this dashboard database.</div>
-          </div>
-          <div class="demo-actions">
-            <button class="primary-button" id="start-real-llm-benchmark" data-action="start-real-llm-benchmark">Start Real LLM Benchmark</button>
-            <span class="pill" id="real-llm-benchmark-status">idle</span>
-          </div>
-        </div>
-      </div>
-      <div class="panel span-12" data-module="demos">
-        <div class="demo-panel">
-          <div class="demo-copy">
-            <div class="demo-title">Claude Steer Demo</div>
-            <div class="muted">Starts a medium-length interactive Claude Code task. Open the Claude agent and send steering while it runs.</div>
-          </div>
-          <div class="demo-actions">
-            <button class="primary-button" id="start-claude-steer-demo" data-action="start-claude-steer-demo">Start Claude Steer Demo</button>
-            <span class="pill" id="claude-steer-demo-status">idle</span>
-          </div>
-        </div>
-      </div>
-      <div class="panel span-12 simple-home simple-only" data-module="overview">
-        <div class="simple-home-inner">
-          <div class="simple-system-line" id="simple-system-line"></div>
-          <div class="simple-prompt-title">Where should we begin?</div>
-          <div class="simple-composer-shell">
-            <div class="simple-composer-main">
-              <button class="icon-button" id="simple-config-toggle" data-action="toggle-simple-config" aria-expanded="false" title="Config">+</button>
-              <textarea id="simple-task-goal" placeholder="Ask the workforce to do something..."></textarea>
-              <div class="simple-composer-actions">
-                <span class="pill" id="designed-task-status-simple">idle</span>
-                <button class="primary-button" id="simple-design-task-config" data-action="design-task-config">Design Org</button>
-                <button class="primary-button simple-run-button" id="simple-start-designed-task" data-action="start-designed-task" hidden>Run</button>
-                <span hidden id="simple-task-status">idle</span>
-                <button hidden id="start-simple-task" data-action="start-simple-task">Run Direct</button>
-              </div>
-            </div>
-            <div class="simple-config-summary-row">
-              <span id="simple-config-summary">Config loading...</span>
-              <div class="simple-config-actions">
-                <select id="task-filter-select-simple" aria-label="Filter task"><option value="">All tasks</option></select>
-                <button id="export-task-trace-simple" data-action="export-task-trace">Export Trace</button>
-                <span class="pill" id="task-trace-export-status-simple">trace idle</span>
-              </div>
-            </div>
-            <div class="simple-config-panel" id="simple-config-panel">
-              <div class="simple-config-grid">
-                <label>Headcount
-                  <input id="simple-designed-task-headcount" type="number" min="3" value="6">
-                </label>
-                <label>Token budget
-                  <input id="simple-designed-task-token-budget" type="number" min="0" value="600000">
-                </label>
-                <label>Manager model
-                  <input id="simple-designed-task-management-model" value="openai/gpt-oss-120b:free">
-                </label>
-                <label>Worker model
-                  <input id="simple-designed-task-worker-model" value="poolside/laguna-m.1:free">
-                </label>
-                <label style="display:inline-flex;grid-auto-flow:column;align-items:center;gap:6px;width:auto;">
-                  <input id="simple-designed-task-use-llm" type="checkbox" checked style="width:auto;"> use LLM
-                </label>
-                <button id="load-runtime-config-simple" data-action="load-runtime-config">Load Config</button>
-                <button class="primary-button" id="save-runtime-config-simple" data-action="save-runtime-config">Save Config</button>
-                <span class="pill" id="runtime-config-status-simple">config idle</span>
-              </div>
-              <div class="simple-config-editors">
-                <label>Runtime config JSON
-                  <textarea class="config-editor" id="runtime-config-json-simple" spellcheck="false"></textarea>
-                </label>
-                <label>Generated task config JSON
-                  <textarea class="config-editor" id="simple-designed-task-config-json" spellcheck="false"></textarea>
-                </label>
+          <div class="panel">
+            <div class="demo-panel">
+              <div class="demo-copy"><div class="demo-title">Long RFC Demo</div></div>
+              <div class="demo-actions">
+                <button class="primary-button" id="start-long-rfc-demo" data-action="start-long-rfc-demo">Start Long RFC Demo</button>
+                <span class="pill" id="long-rfc-demo-status">idle</span>
               </div>
             </div>
           </div>
-          <div class="operation-progress" id="simple-designed-task-progress" aria-live="polite">
-            <div class="operation-progress-head">
-              <div>
-                <div class="operation-progress-title" id="simple-designed-task-progress-title">No design request running.</div>
-                <div class="operation-progress-detail" id="simple-designed-task-progress-detail">Ready.</div>
+          <div class="panel">
+            <div class="demo-panel">
+              <div class="demo-copy"><div class="demo-title">Real LLM Benchmark</div></div>
+              <div class="demo-actions">
+                <button class="primary-button" id="start-real-llm-benchmark" data-action="start-real-llm-benchmark">Start Real LLM Benchmark</button>
+                <span class="pill" id="real-llm-benchmark-status">idle</span>
               </div>
-              <span class="pill" id="simple-designed-task-progress-elapsed">idle</span>
             </div>
-            <div class="progress-track"><div class="progress-fill"></div></div>
-            <div class="progress-steps" id="simple-designed-task-progress-steps"></div>
           </div>
-          <div class="simple-draft-shell" id="simple-draft-shell">
-            <div class="draft-org-head">
-              <div class="draft-org-title">Draft Organization Tree</div>
-              <span class="pill" id="simple-draft-org-summary">no draft</span>
+          <div class="panel">
+            <div class="demo-panel">
+              <div class="demo-copy"><div class="demo-title">Claude Steer Demo</div></div>
+              <div class="demo-actions">
+                <button class="primary-button" id="start-claude-steer-demo" data-action="start-claude-steer-demo">Start Claude Steer Demo</button>
+                <span class="pill" id="claude-steer-demo-status">idle</span>
+              </div>
             </div>
-            <div id="simple-draft-org-tree" class="muted">No draft yet.</div>
           </div>
-          <div class="simple-task-report" id="simple-task-report"></div>
+          <div class="panel">
+            <div class="task-designer">
+              <div class="demo-panel">
+                <div class="demo-copy"><div class="demo-title">Draft Config / Start Confirmed Task</div></div>
+                <div class="demo-actions">
+                  <button class="primary-button" id="start-designed-task" data-action="start-designed-task">Start Confirmed Task</button>
+                  <label style="display:inline-flex;grid-auto-flow:column;align-items:center;gap:6px;width:auto;">
+                    <input id="designed-task-use-llm" type="checkbox" checked style="width:auto;"> use LLM
+                  </label>
+                  <span class="pill" id="designed-task-status">idle</span>
+                  <label style="display:inline-flex;grid-auto-flow:column;align-items:center;gap:6px;width:auto;">
+                    Filter task
+                    <select id="task-filter-select" style="min-width:260px;"><option value="">All tasks</option></select>
+                  </label>
+                  <button id="export-task-trace" data-action="export-task-trace">Export Trace</button>
+                  <span class="pill" id="task-trace-export-status">trace idle</span>
+                </div>
+              </div>
+              <div class="form-row">
+                <label>Headcount<input id="designed-task-headcount" type="number" min="3" value="6"></label>
+                <label>Token budget<input id="designed-task-token-budget" type="number" min="0" value="600000"></label>
+                <label>Manager model<input id="designed-task-management-model" value="openai/gpt-oss-120b:free"></label>
+                <label>Worker model<input id="designed-task-worker-model" value="poolside/laguna-m.1:free"></label>
+              </div>
+              <div id="designed-task-progress" class="operation-progress" aria-live="polite">
+                <div class="operation-progress-head">
+                  <div>
+                    <div class="operation-progress-title" id="designed-task-progress-title">No design request running.</div>
+                    <div class="operation-progress-detail" id="designed-task-progress-detail">Click Design Org to generate a draft organization.</div>
+                  </div>
+                  <span class="pill" id="designed-task-progress-elapsed">idle</span>
+                </div>
+                <div class="progress-track"><div class="progress-fill"></div></div>
+                <div class="progress-steps" id="designed-task-progress-steps"></div>
+              </div>
+              <div class="draft-org-panel">
+                <div class="draft-org-head"><div class="draft-org-title">Draft Organization Tree</div><span class="pill" id="draft-org-summary">no draft</span></div>
+                <div id="draft-org-tree" class="muted">No draft yet.</div>
+              </div>
+              <label>Editable config JSON<textarea class="config-editor" id="designed-task-config-json" spellcheck="false"></textarea></label>
+            </div>
+          </div>
         </div>
-      </div>
-      <div class="panel span-12" data-module="overview">
-        <div class="org-toolbar">
-          <h2>Org Chart</h2>
-          <div class="muted" id="org-summary"></div>
+
+        <div style="display:none;">
+          <span id="stream-status">connecting</span>
+          <span id="updated"></span>
+          <div id="metrics"></div>
+          <div id="human-reports"></div>
         </div>
-        <div class="communication-pulses simple-only" id="communication-pulses"></div>
-        <div id="org-chart"></div>
-      </div>
-      <div class="panel span-12" data-module="overview">
-        <h2>Human Reports</h2>
-        <div class="human-reports" id="human-reports"></div>
-      </div>
-      <div class="panel span-12 debug-only" data-module="debug">
-        <h2>Internal Manager Reports</h2>
-        <div class="manager-reports" id="manager-reports"></div>
-      </div>
-      <div class="panel span-6 debug-only" data-module="debug">
-        <h2>Agents</h2>
-        <table id="agents"></table>
-      </div>
-      <div class="panel span-6 debug-only" data-module="debug">
-        <h2>Tasks</h2>
-        <table id="tasks"></table>
-      </div>
-      <div class="panel span-12 debug-only" data-module="debug">
-        <h2>Work Queue</h2>
-        <table id="work-queue"></table>
-      </div>
-      <div class="panel span-6 debug-only" data-module="debug">
-        <h2>Agent Runs</h2>
-        <table id="runs"></table>
-      </div>
-      <div class="panel span-6 debug-only" data-module="debug">
-        <h2>Reports</h2>
-        <table id="reports"></table>
-      </div>
-      <div class="panel span-12 debug-only" data-module="debug">
-        <h2>Live Agent Output</h2>
-        <div id="output"></div>
-      </div>
-      <div class="panel span-6 debug-only" data-module="debug">
-        <h2>Replay</h2>
-        <pre id="replay"></pre>
-      </div>
-      <div class="panel span-6 debug-only" data-module="debug">
-        <h2>Trajectories</h2>
-        <pre id="trajectories"></pre>
-      </div>
-    </section>
+
+      </div><!-- #main-content -->
+    </div><!-- #main-scroll -->
   </main>
+</div><!-- #app-shell -->
+
   <div class="detail-backdrop" id="agent-backdrop" hidden data-action="close-detail"></div>
   <aside class="detail-drawer" id="agent-detail" aria-hidden="true"></aside>
+
   <script>
+    /* ===== New homepage design glue ===== */
+    let sidebarCollapsed = false;
+    let sidebarSearchTerm = "";
+    let lastAllTasks = [];
+    let lastTasks = [];
+    let pipelineState = { phase: "idle", state: "idle" };
+
+    function fmt(n) {
+      if (n == null || n === "" || (typeof n === "number" && !isFinite(n))) return "-";
+      const num = Number(n);
+      if (!isFinite(num)) return esc(String(n));
+      if (Math.abs(num) >= 1000000) return (num / 1000000).toFixed(num % 1000000 === 0 ? 0 : 1) + "M";
+      if (Math.abs(num) >= 1000) return (num / 1000).toFixed(num % 1000 === 0 ? 0 : 1) + "k";
+      return String(num);
+    }
+
+    function onSidebarSearch(value) {
+      sidebarSearchTerm = (value || "").toLowerCase();
+      renderSidebarTasks(lastAllTasks, lastTasks);
+    }
+
+    function onGoalInput(el) {
+      const count = document.getElementById("input-char-count");
+      const len = (el.value || "").length;
+      if (count) count.textContent = len ? `${len} chars` : "";
+      el.style.height = "auto";
+      el.style.height = Math.min(el.scrollHeight, 200) + "px";
+    }
+
+    function onGoalFocus() {
+      const card = document.getElementById("input-card");
+      if (card) { card.classList.remove("idle"); card.classList.add("focused"); }
+    }
+
+    function onGoalBlur() {
+      const card = document.getElementById("input-card");
+      const el = document.getElementById("designed-task-goal");
+      if (card && !(el && el.value)) { card.classList.remove("focused"); card.classList.add("idle"); }
+      else if (card) { card.classList.remove("focused"); card.classList.add("idle"); }
+    }
+
+    function applyExample(text) {
+      const el = document.getElementById("designed-task-goal");
+      if (!el) return;
+      el.value = text;
+      el.focus();
+      onGoalInput(el);
+    }
+
+    function metricColorFor(kind) {
+      if (kind === "good") return "#3f7d57";
+      if (kind === "bad") return "#b3524b";
+      if (kind === "warn") return "#a8742a";
+      return "#1c1b19";
+    }
+
+    function dotColorFor(kind) {
+      if (kind === "good") return "#4a8b63";
+      if (kind === "bad") return "#b3524b";
+      if (kind === "warn") return "#b07d2f";
+      return "#cfcabf";
+    }
+
+    function renderStatusBar(data) {
+      const host = document.getElementById("status-metrics");
+      if (!host) return;
+      const company = (data && data.company) || {};
+      const nameEl = document.getElementById("company-name-status");
+      if (nameEl) nameEl.textContent = company.name || "Workforce Runtime";
+      const initialsEl = document.getElementById("company-initials");
+      if (initialsEl) {
+        const initials = (company.name || "WR").split(/\s+/).map(w => w[0]).filter(Boolean).slice(0, 2).join("").toUpperCase();
+        initialsEl.textContent = initials || "WR";
+      }
+      const tasks = (data && data.tasks) || [];
+      const agentsList = (data && data.agents) || [];
+      const budget = (data && data.budget) || {};
+      const active = tasks.filter(t => ["assigned", "in_progress", "blocked"].includes(t.status)).length;
+      const completed = tasks.filter(t => t.status === "completed").length;
+      const failed = tasks.filter(t => t.status === "failed").length;
+      const busyAgents = agentsList.filter(a => ["busy", "assigned", "in_progress", "running"].includes(a.status)).length;
+      const tokensUsed = budget.tokens_used || 0;
+      const tokenLimit = budget.token_budget_limit || 0;
+      const metrics = [
+        { label: "Agents", value: `${agentsList.length}${budget.headcount_limit ? "/" + budget.headcount_limit : ""}`, kind: "neutral" },
+        { label: "Working", value: busyAgents, kind: busyAgents ? "warn" : "neutral" },
+        { label: "Active", value: active, kind: active ? "warn" : "neutral" },
+        { label: "Done", value: completed, kind: completed ? "good" : "neutral" },
+        { label: "Failed", value: failed, kind: failed ? "bad" : "neutral" },
+        { label: "Tokens", value: tokenLimit ? `${fmt(tokensUsed)}/${fmt(tokenLimit)}` : fmt(tokensUsed), kind: "neutral" },
+        { label: "Events", value: fmt((data && (data.agent_output || data.worker_output) || []).length), kind: "neutral" },
+      ];
+      host.innerHTML = metrics.map(m => `
+        <div class="sbar-metric">
+          <div class="sbar-metric-lrow">
+            <span class="sbar-metric-dot" style="background:${dotColorFor(m.kind)};"></span>
+            <span class="sbar-metric-label">${esc(m.label)}</span>
+          </div>
+          <span class="sbar-metric-val" style="color:${metricColorFor(m.kind)};">${m.value}</span>
+        </div>`).join("");
+      const sub = document.getElementById("sidebar-sub");
+      if (sub) sub.textContent = `${agentsList.length} agent${agentsList.length === 1 ? "" : "s"}`;
+    }
+
+    function taskStatusKind(status) {
+      if (status === "completed") return "good";
+      if (status === "failed" || status === "timed_out") return "bad";
+      if (["assigned", "in_progress", "blocked", "running"].includes(status)) return "warn";
+      return "neutral";
+    }
+
+    function renderSidebarTasks(allTasks, tasks) {
+      lastAllTasks = allTasks || [];
+      lastTasks = tasks || [];
+      const host = document.getElementById("sidebar-tasks");
+      if (!host) return;
+      const source = (lastAllTasks.length ? lastAllTasks : lastTasks) || [];
+      let list = source.slice();
+      if (sidebarSearchTerm) {
+        list = list.filter(t => `${t.task_id} ${t.title || ""}`.toLowerCase().includes(sidebarSearchTerm));
+      }
+      const countEl = document.getElementById("sidebar-task-count");
+      if (countEl) countEl.textContent = String(list.length);
+      const groups = { active: [], completed: [], other: [] };
+      for (const t of list) {
+        if (["assigned", "in_progress", "blocked", "running"].includes(t.status)) groups.active.push(t);
+        else if (t.status === "completed") groups.completed.push(t);
+        else groups.other.push(t);
+      }
+      const renderGroup = (label, items) => {
+        if (!items.length) return "";
+        return `<div class="task-group-label">${esc(label)}</div>` + items.map(t => {
+          const kind = taskStatusKind(t.status);
+          const selected = t.task_id === selectedTaskId ? " selected" : "";
+          const title = t.title || t.task_id;
+          return `<button class="task-item${selected}" data-action="select-task" data-task-id="${esc(t.task_id)}" title="${esc(title)}">
+            <span class="task-item-dot" style="background:${dotColorFor(kind)};border-radius:50%;"></span>
+            <span class="task-item-name">${esc(title)}</span>
+          </button>`;
+        }).join("");
+      };
+      const html = renderGroup("Active", groups.active) + renderGroup("Completed", groups.completed) + renderGroup("Other", groups.other);
+      host.innerHTML = html || `<div class="task-group-label">No tasks</div>`;
+    }
+
+    const PIPELINE_STEPS = [
+      { key: "validate", label: "Brief" },
+      { key: "request", label: "Request" },
+      { key: "model", label: "Design" },
+      { key: "render", label: "Staff" },
+      { key: "done", label: "Ready" },
+    ];
+
+    function pipelinePhaseIndex(phase) {
+      const map = { validate: 0, request: 1, model: 2, draft: 2, render: 3, staff: 3, execute: 3, done: 4, report: 4 };
+      return map[phase] != null ? map[phase] : -1;
+    }
+
+    function renderPipelineCard() {
+      const host = document.getElementById("pipeline-card");
+      if (!host) return;
+      const prog = (typeof designedTaskProgress !== "undefined" && designedTaskProgress) || pipelineState;
+      const state = prog.state || "idle";
+      const phase = prog.phase || "idle";
+      const activeIdx = pipelinePhaseIndex(phase);
+      const running = state === "running" || state === "active";
+      const finished = state === "finished";
+      const failed = state === "failed";
+
+      if (state === "idle" && activeIdx < 0) {
+        host.style.display = "none";
+        host.innerHTML = "";
+        return;
+      }
+      host.style.display = "block";
+
+      let bg = "#fff", border = "1px solid #e6e3de", badgeBg = "#f3f1ec", badgeColor = "#6b675f", badgeText = "Idle", iconBg = "#f3f1ec", iconColor = "#86827a";
+      if (running) { bg = "#fbf9f4"; border = "1px solid #ecdcb8"; badgeBg = "#f6ecd5"; badgeColor = "#9a6c25"; badgeText = "Running"; iconBg = "#f6ecd5"; iconColor = "#b07d2f"; }
+      else if (finished) { bg = "#f6faf7"; border = "1px solid #cbe6d4"; badgeBg = "#e3f1e8"; badgeColor = "#3f7d57"; badgeText = "Complete"; iconBg = "#e3f1e8"; iconColor = "#4a8b63"; }
+      else if (failed) { bg = "#fbf4f3"; border = "1px solid #ecccc8"; badgeBg = "#f6e0dd"; badgeColor = "#b3524b"; badgeText = "Failed"; iconBg = "#f6e0dd"; iconColor = "#b3524b"; }
+
+      host.style.background = bg;
+      host.style.border = border;
+
+      const title = prog.title || (running ? "Designing your organization" : finished ? "Organization ready" : failed ? "Pipeline failed" : "Pipeline");
+      const detail = prog.detail || "";
+
+      const stepsHtml = PIPELINE_STEPS.map((step, i) => {
+        let dotBorder = "#ddd9d2", dotInner = "transparent", labelColor = "#a39e95";
+        const done = (finished) || (activeIdx > i);
+        const isActive = activeIdx === i && (running);
+        if (done) { dotBorder = "#4a8b63"; dotInner = "#4a8b63"; labelColor = "#3f7d57"; }
+        else if (isActive) { dotBorder = "#b07d2f"; dotInner = "#b07d2f"; labelColor = "#9a6c25"; }
+        else if (failed && activeIdx === i) { dotBorder = "#b3524b"; dotInner = "#b3524b"; labelColor = "#b3524b"; }
+        const dotStyle = isActive ? "animation:wrPulse 1.4s ease-in-out infinite;" : "";
+        const col = `<div class="pipe-step-col">
+          <div class="pipe-dot-outer" style="border-color:${dotBorder};${dotStyle}"><span class="pipe-dot-inner" style="background:${dotInner};"></span></div>
+          <span class="pipe-step-label" style="color:${labelColor};">${esc(step.label)}</span>
+        </div>`;
+        if (i === PIPELINE_STEPS.length - 1) return col;
+        let lineColor = "#e3e0da";
+        let lineStyle = `background:${lineColor};`;
+        if (activeIdx > i || finished) { lineStyle = "background:#9fd4b7;"; }
+        else if (isActive) { lineStyle = "background:repeating-linear-gradient(90deg,#d9c79c 0 6px,transparent 6px 12px);background-size:14px 2px;animation:wrFlow .7s linear infinite;"; }
+        return `<div class="pipe-step-wrap" style="flex:1;display:flex;align-items:center;">${col}<div class="pipe-line" style="${lineStyle}"></div></div>`;
+      }).join("");
+
+      const retryHtml = failed
+        ? `<button class="pipe-retry" data-action="design-task-config" style="border:1px solid #ecccc8;background:#fff;color:#b3524b;">Retry</button>`
+        : "";
+
+      host.innerHTML = `
+        <div class="pipe-head">
+          <div class="pipe-head-left">
+            <div class="pipe-icon" style="background:${iconBg};color:${iconColor};">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3M3.4 3.4l2.1 2.1M10.5 10.5l2.1 2.1M12.6 3.4l-2.1 2.1M5.5 10.5l-2.1 2.1" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+            </div>
+            <div>
+              <div class="pipe-title">${esc(title)}</div>
+              ${detail ? `<div class="pipe-sub">${esc(detail)}</div>` : ""}
+            </div>
+          </div>
+          <div class="pipe-head-right">
+            <span class="pipe-badge" style="background:${badgeBg};color:${badgeColor};">${esc(badgeText)}</span>
+            ${retryHtml}
+          </div>
+        </div>
+        <div class="pipe-steps">${stepsHtml}</div>`;
+    }
+
+    function reportStatusMeta(report) {
+      const requiresDecision = report.requires_decision || report.decision_required || (report.kind === "decision");
+      if (requiresDecision) return { text: "Needs decision", bg: "#f6ecd5", color: "#9a6c25", dot: "#b07d2f" };
+      const status = (report.status || "").toLowerCase();
+      if (status.includes("fail") || status.includes("block")) return { text: "Blocked", bg: "#f6e0dd", color: "#b3524b", dot: "#b3524b" };
+      return { text: "Informational", bg: "#e3f1e8", color: "#3f7d57", dot: "#4a8b63" };
+    }
+
+    function renderHomeReportCard(report) {
+      const meta = reportStatusMeta(report);
+      const fromId = report.from_agent_id || report.author || "CEO";
+      const initials = String(fromId).split(/[\s_-]+/).map(w => w[0]).filter(Boolean).slice(0, 2).join("").toUpperCase() || "AI";
+      const title = report.title || report.summary_title || `Report ${report.report_id || ""}`.trim();
+      const time = report.created_at ? new Date(report.created_at).toLocaleString() : "";
+      const confidence = report.confidence != null ? Number(report.confidence) : null;
+      const confPct = confidence != null ? Math.round(confidence <= 1 ? confidence * 100 : confidence) : null;
+      const confColor = confPct == null ? "#cfcabf" : (confPct >= 70 ? "#4a8b63" : confPct >= 40 ? "#b07d2f" : "#b3524b");
+      const summary = report.message || report.summary || report.body || "";
+      const risks = report.risks || [];
+      const recommendation = report.recommendation || "";
+      const nextActions = report.next_actions || report.next_steps || [];
+      const decisionQ = report.decision_question || report.decision || (report.requires_decision ? (report.question || "Approve and proceed?") : "");
+
+      const sevColor = (sev) => {
+        const s = String(sev || "").toLowerCase();
+        if (s.includes("high") || s.includes("crit")) return { bg: "#f6e0dd", color: "#b3524b" };
+        if (s.includes("med")) return { bg: "#f6ecd5", color: "#9a6c25" };
+        return { bg: "#eceae5", color: "#76726b" };
+      };
+
+      const risksHtml = risks.length ? `
+        <div class="wr-slabel">Risks</div>
+        <div class="wr-risks">
+          ${risks.map(r => {
+            const text = typeof r === "string" ? r : (r.description || r.text || r.risk || "");
+            const sev = typeof r === "string" ? "" : (r.severity || r.level || "");
+            const sc = sevColor(sev);
+            return `<div class="wr-risk"><span class="wr-risk-sev" style="background:${sc.bg};color:${sc.color};">${esc((sev || "note").toUpperCase())}</span><span class="wr-risk-text">${esc(text)}</span></div>`;
+          }).join("")}
+        </div>` : "";
+
+      const recHtml = (recommendation || nextActions.length) ? `
+        <div class="wr-rec-grid">
+          ${recommendation ? `<div><div class="wr-slabel">Recommendation</div><p class="wr-rec-text">${esc(recommendation)}</p></div>` : "<div></div>"}
+          ${nextActions.length ? `<div><div class="wr-slabel">Next actions</div><div class="wr-next-actions">${nextActions.map(a => {
+            const t = typeof a === "string" ? a : (a.description || a.text || a.action || "");
+            return `<div class="wr-na"><span style="color:#86827a;">→</span><span>${esc(t)}</span></div>`;
+          }).join("")}</div></div>` : ""}
+        </div>` : "";
+
+      const decisionHtml = decisionQ ? `
+        <div class="wr-dec-box">
+          <div class="wr-dec-hdr">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="color:#b07d2f;"><path d="M8 1.5 14.5 13H1.5L8 1.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.2v3M8 11.2v.01" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+            <span class="wr-dec-label">Decision required</span>
+          </div>
+          <p class="wr-dec-q">${esc(decisionQ)}</p>
+          <div class="wr-dec-actions">
+            <button class="wr-dec-primary" data-action="report-detail" data-report-id="${esc(report.report_id || "")}">Review &amp; decide</button>
+            <button class="wr-dec-alt" data-action="report-detail" data-report-id="${esc(report.report_id || "")}">View details</button>
+          </div>
+        </div>` : "";
+
+      return `
+        <div class="wr-report-card">
+          <div class="wr-rh">
+            <div class="wr-rh-left">
+              <div class="wr-avatar">${esc(initials)}</div>
+              <div style="min-width:0;">
+                <div class="wr-rtitle">${esc(title)}</div>
+                <div class="wr-rmeta">
+                  <span>${esc(fromId)}</span>
+                  ${time ? `<span class="wr-rmeta-dot"></span><span>${esc(time)}</span>` : ""}
+                  ${report.task_id ? `<span class="wr-rmeta-dot"></span><span>${esc(report.task_id)}</span>` : ""}
+                </div>
+              </div>
+            </div>
+            <div class="wr-rh-right">
+              <span class="wr-sbadge" style="background:${meta.bg};color:${meta.color};"><span class="wr-sbadge-dot" style="background:${meta.dot};"></span>${esc(meta.text)}</span>
+              ${confPct != null ? `<div class="wr-conf-row"><span class="wr-conf-lbl">Confidence</span><div class="wr-conf-bar"><div class="wr-conf-fill" style="width:${confPct}%;background:${confColor};"></div></div><span class="wr-conf-val">${confPct}%</span></div>` : ""}
+            </div>
+          </div>
+          <div class="wr-rbody">
+            ${summary ? `<div class="wr-slabel">Summary</div><p class="wr-summary">${esc(summary)}</p>` : ""}
+            ${risksHtml}
+            ${recHtml}
+          </div>
+          ${decisionHtml}
+        </div>`;
+    }
+
+    function renderHomeHumanReports(reports) {
+      const host = document.getElementById("home-human-reports");
+      if (!host) return;
+      const list = reports || [];
+      const countEl = document.getElementById("reports-count");
+      if (countEl) countEl.textContent = String(list.length);
+      const fromEl = document.getElementById("reports-from");
+      if (fromEl) {
+        const names = Array.from(new Set(list.map(r => r.from_agent_id || r.author).filter(Boolean)));
+        fromEl.textContent = names.length ? `from ${names.slice(0, 3).join(", ")}${names.length > 3 ? "…" : ""}` : "";
+      }
+      if (!list.length) {
+        host.innerHTML = `
+          <div class="no-reports-card">
+            <div class="no-reports-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v9A1.5 1.5 0 0 1 18.5 16H9l-4 4V5.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+            </div>
+            <div class="no-reports-title">No reports yet</div>
+            <div class="no-reports-desc">When your workforce reaches a milestone or needs a decision, reports from leadership will appear here.</div>
+          </div>`;
+        return;
+      }
+      host.innerHTML = list.map(renderHomeReportCard).join("");
+    }
+
     const DEFAULT_CONFIG = {
-      dashboard: { refresh_interval_ms: 5000, max_visible_agents: 80, simple_level_agent_limit: 8, state_agent_limit: 60, collapse_depth: 3, show_idle_activity: true },
+      dashboard: { refresh_interval_ms: 5000, max_visible_agents: 80, collapse_depth: 3, show_idle_activity: true },
       activity: { recent_output_items: 12, recent_tool_items: 12, recent_event_items: 10, full_stream_limit: 200, global_output_limit: 200 },
-      summaries: { mode: "local", max_chars: 140 },
-      queue: { max_active_agents: 20, lease_seconds: 300, per_kind_limits: { llm_request: 10, tool_call: 20, worker_run: 10 } }
+      summaries: { mode: "local", max_chars: 140 }
     };
     const ACTIVITY_EVENT_TYPES = new Set([
       "task_created",
@@ -3613,26 +3172,12 @@ HTML = r"""<!doctype html>
       "tool_request_submitted",
       "tool_request_approved",
       "tool_request_rejected",
-      "work_item_enqueued",
-      "work_item_deduplicated",
-      "work_item_claimed",
-      "work_item_completed",
-      "work_item_failed",
-      "work_item_requeued",
-      "work_item_cancelled",
-      "work_item_lease_expired",
-      "work_item_execution_started",
-      "human_agent_steer_requested",
-      "human_agent_steer_sent",
-      "human_agent_steer_failed",
-      "human_agent_interrupt_sent",
       "agent_run_path_registered",
       "agent_run_attempt_started",
       "agent_run_attempt_failed",
       "agent_run_retrying",
       "trace_file_written",
       "runtime_config_updated",
-      "simple_task_run_failed",
     ]);
     const esc = (value) => String(value ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const statusClass = (value) => esc(value).replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -3646,11 +3191,7 @@ HTML = r"""<!doctype html>
     let liveOutput = [];
     let orgChart = [];
     let agents = [];
-    let agentDetails = {};
-    let agentDetailRequests = new Set();
-    let expandedSummaryAgents = new Set();
     let agentActivity = {};
-    let steerableSessions = [];
     let dashboardConfig = structuredClone(DEFAULT_CONFIG);
     let expandedNodes = new Set();
     let collapsedNodes = new Set();
@@ -3659,12 +3200,10 @@ HTML = r"""<!doctype html>
     let currentTaskScope = new Set();
     let visibleNodeCount = 0;
     let dashboardMode = localStorage.getItem("workforceDashboardMode") || "simple";
-    let dashboardModule = localStorage.getItem("workforceDashboardModule") || "overview";
     let communicationPulses = [];
     let longRfcDemoStatus = { status: "idle", running: false };
     let realLlmBenchmarkStatus = { status: "idle", running: false };
     let claudeSteerDemoStatus = { status: "idle", running: false };
-    let simpleTaskStatus = { status: "idle", running: false };
     let designedTaskStatus = { status: "idle", running: false };
     let designedTaskConfig = null;
     let designedTaskProgress = {
@@ -3696,49 +3235,9 @@ HTML = r"""<!doctype html>
       return dashboardConfig?.[section]?.[key] ?? fallback;
     }
 
-    function byId(id) {
-      return document.getElementById(id);
-    }
-
-    function activeField(debugId, simpleId) {
-      const simple = byId(simpleId);
-      const debug = byId(debugId);
-      if (dashboardMode === "simple" && simple) return simple;
-      return debug || simple;
-    }
-
-    function fieldValue(debugId, simpleId, fallback = "") {
-      const element = activeField(debugId, simpleId);
-      return element?.value ?? fallback;
-    }
-
-    function fieldChecked(debugId, simpleId, fallback = false) {
-      const element = activeField(debugId, simpleId);
-      return element ? Boolean(element.checked) : fallback;
-    }
-
-    function setBothValues(debugId, simpleId, value) {
-      for (const id of [debugId, simpleId]) {
-        const element = byId(id);
-        if (element && value != null) element.value = value;
-      }
-    }
-
-    function setBothChecked(debugId, simpleId, value) {
-      for (const id of [debugId, simpleId]) {
-        const element = byId(id);
-        if (element && value != null) element.checked = Boolean(value);
-      }
-    }
-
     function clip(value, limit = cfg("summaries", "max_chars", 140)) {
       const text = String(value ?? "").replace(/\s+/g, " ").trim();
       return text.length > limit ? `${text.slice(0, Math.max(limit - 3, 1))}...` : text;
-    }
-
-    function clipTail(value, limit = cfg("summaries", "max_chars", 140)) {
-      const text = String(value ?? "").replace(/\s+/g, " ").trim();
-      return text.length > limit ? `...${text.slice(-Math.max(limit - 3, 1))}` : text;
     }
 
     function renderOutput() {
@@ -3811,9 +3310,8 @@ HTML = r"""<!doctype html>
         labelId: "claude-steer-demo-status",
         buttonId: "start-claude-steer-demo",
         statusPayload: claudeSteerDemoStatus,
-        resultText: claudeSteerDemoStatus?.task_id ? ` task=${claudeSteerDemoStatus.task_id}` : "",
+        resultText: claudeSteerDemoStatus?.result?.root_task_id ? ` root=${claudeSteerDemoStatus.result.root_task_id}` : "",
       });
-      renderSimpleTaskStatus();
       const designedResult = designedTaskStatus?.result;
       renderRunStatus({
         labelId: "designed-task-status",
@@ -3821,72 +3319,8 @@ HTML = r"""<!doctype html>
         statusPayload: designedTaskStatus,
         resultText: designedResult?.root_task_id ? ` root=${designedResult.root_task_id}` : designedTaskStatus?.root_task_id ? ` root=${designedTaskStatus.root_task_id}` : "",
       });
-      renderDesignedStatusControls();
-    }
-
-    function renderDesignedStatusControls() {
-      const status = designedTaskStatus?.status || "idle";
-      const rootTask = designedTaskStatus?.root_task_id || designedTaskStatus?.result?.root_task_id || "";
-      const error = designedTaskStatus?.error ? ` error=${clip(designedTaskStatus.error, 90)}` : "";
-      const labelText = `${status}${rootTask ? " root=" + rootTask : ""}${error}`;
-      for (const id of ["designed-task-status-simple"]) {
-        const label = document.getElementById(id);
-        if (label) label.textContent = labelText;
-      }
-      for (const id of ["design-task-config", "simple-design-task-config"]) {
-        const button = document.getElementById(id);
-        if (button) button.disabled = Boolean(designedTaskStatus?.running);
-      }
-      for (const id of ["simple-start-designed-task"]) {
-        const button = document.getElementById(id);
-        if (button) {
-          button.disabled = Boolean(designedTaskStatus?.running);
-          button.hidden = !designedTaskConfig;
-        }
-      }
-    }
-
-    function renderSimpleTaskStatus() {
-      const label = document.getElementById("simple-task-status");
-      const button = document.getElementById("start-simple-task");
-      const report = document.getElementById("simple-task-report");
-      if (!label || !button || !report) return;
-      const status = simpleTaskStatus?.status || "idle";
-      const taskId = simpleTaskStatus?.task_id || simpleTaskStatus?.result?.task_id || "";
-      const error = simpleTaskStatus?.error ? ` error=${clip(simpleTaskStatus.error, 90)}` : "";
-      label.textContent = `${status}${taskId ? " task=" + taskId : ""}${error}`;
-      button.disabled = Boolean(simpleTaskStatus?.running);
-      const result = simpleTaskStatus?.result || {};
-      const reportText = result.report_text || "";
-      const reportPath = result.result_path || "";
-      if (simpleTaskStatus?.running) {
-        report.innerHTML = `<div class="simple-task-report-card">
-          <div class="human-report-head">
-            <div>
-              <div class="human-report-title">Running</div>
-              <div class="human-report-meta">${esc(taskId || "task is being created")}</div>
-            </div>
-            <span class="pill">live</span>
-          </div>
-          <div class="simple-task-report-text">The organization is working on the task. Open the Claude worker in the org chart to steer it while it runs.</div>
-        </div>`;
-        return;
-      }
-      if (status === "completed" || status === "failed") {
-        const pathLink = reportPath ? ` ${renderFileLink(reportPath, "result")}` : "";
-        report.innerHTML = `<div class="simple-task-report-card">
-          <div class="human-report-head">
-            <div>
-              <div class="human-report-title">${status === "completed" ? "Final Report" : "Run Failed"}</div>
-              <div class="human-report-meta">${esc(taskId || "-")}${pathLink}</div>
-            </div>
-            <span class="pill">${esc(status)}</span>
-          </div>
-          <div class="simple-task-report-text">${esc(reportText || simpleTaskStatus.error || "No report text was recorded.")}</div>
-        </div>`;
-        return;
-      }
-      report.innerHTML = "";
+      const designButton = document.getElementById("design-task-config");
+      if (designButton) designButton.disabled = Boolean(designedTaskStatus?.running);
     }
 
     function renderRunStatus({labelId, buttonId, statusPayload, resultText}) {
@@ -3945,17 +3379,12 @@ HTML = r"""<!doctype html>
     }
 
     function renderDesignedProgress() {
-      renderDesignedProgressView("designed-task");
-      renderDesignedProgressView("simple-designed-task");
-    }
-
-    function renderDesignedProgressView(prefix) {
-      const panel = document.getElementById(`${prefix}-progress`);
+      const panel = document.getElementById("designed-task-progress");
       if (!panel) return;
-      const title = document.getElementById(`${prefix}-progress-title`);
-      const detail = document.getElementById(`${prefix}-progress-detail`);
-      const elapsed = document.getElementById(`${prefix}-progress-elapsed`);
-      const steps = document.getElementById(`${prefix}-progress-steps`);
+      const title = document.getElementById("designed-task-progress-title");
+      const detail = document.getElementById("designed-task-progress-detail");
+      const elapsed = document.getElementById("designed-task-progress-elapsed");
+      const steps = document.getElementById("designed-task-progress-steps");
       panel.classList.toggle("active", Boolean(designedTaskProgress.active));
       panel.classList.toggle("finished", designedTaskProgress.state === "finished");
       panel.classList.toggle("failed", designedTaskProgress.state === "failed");
@@ -3970,6 +3399,19 @@ HTML = r"""<!doctype html>
         }
       }
       if (steps) steps.innerHTML = renderDesignedProgressSteps(designedTaskProgress.phase);
+      // Drive the new homepage submit button + pipeline card
+      const submitBtn = document.getElementById("design-task-config");
+      const submitLabel = document.getElementById("submit-label");
+      const iconArrow = document.getElementById("submit-icon-arrow");
+      const iconSpin = document.getElementById("submit-icon-spin");
+      const running = Boolean(designedTaskProgress.active);
+      if (submitBtn) submitBtn.classList.toggle("running", running);
+      if (iconArrow) iconArrow.style.display = running ? "none" : "";
+      if (iconSpin) iconSpin.style.display = running ? "" : "none";
+      if (submitLabel) {
+        submitLabel.textContent = selectedTaskId ? "Send" : (running ? "Designing…" : (designedTaskProgress.state === "finished" ? "Re-design" : "Design Org"));
+      }
+      renderPipelineCard();
     }
 
     function renderDesignedProgressSteps(activePhase) {
@@ -3990,27 +3432,21 @@ HTML = r"""<!doctype html>
     }
 
     async function refreshDemoStatus() {
-      const [longRes, benchmarkRes, claudeSteerRes, simpleRes, designedRes] = await Promise.all([
+      const [longRes, benchmarkRes, claudeSteerRes, designedRes] = await Promise.all([
         fetch("/api/demos/long-rfc/status", { cache: "no-store" }),
         fetch("/api/demos/real-llm-benchmark/status", { cache: "no-store" }),
         fetch("/api/demos/claude-steer/status", { cache: "no-store" }),
-        fetch("/api/simple-task/status", { cache: "no-store" }),
         fetch("/api/designed-task/status", { cache: "no-store" }),
       ]);
       longRfcDemoStatus = await longRes.json();
       realLlmBenchmarkStatus = await benchmarkRes.json();
       claudeSteerDemoStatus = await claudeSteerRes.json();
-      simpleTaskStatus = await simpleRes.json();
       const serverDesignedTaskStatus = await designedRes.json();
       if (designedTaskStatus?.status !== "designing") {
         designedTaskStatus = serverDesignedTaskStatus;
       }
       if (designedTaskStatus?.root_task_id && !selectedTaskId) {
         selectedTaskId = designedTaskStatus.root_task_id;
-        scheduleRefresh(0);
-      }
-      if (simpleTaskStatus?.task_id && !selectedTaskId) {
-        selectedTaskId = simpleTaskStatus.task_id;
         scheduleRefresh(0);
       }
       renderDemoStatus();
@@ -4050,10 +3486,7 @@ HTML = r"""<!doctype html>
 
     async function startClaudeSteerDemo() {
       claudeSteerDemoStatus = { status: "starting", running: true };
-      dashboardModule = "overview";
-      localStorage.setItem("workforceDashboardModule", dashboardModule);
       renderDemoStatus();
-      renderModuleControls();
       const res = await fetch("/api/demos/claude-steer/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4063,48 +3496,61 @@ HTML = r"""<!doctype html>
       if (!res.ok && !claudeSteerDemoStatus.error) {
         claudeSteerDemoStatus.error = `HTTP ${res.status}`;
       }
-      if (claudeSteerDemoStatus?.task_id) {
-        selectedTaskId = claudeSteerDemoStatus.task_id;
-      }
       renderDemoStatus();
       await refresh();
     }
 
-    async function startSimpleTask() {
-      const input = document.getElementById("simple-task-goal");
-      const goal = input?.value?.trim() || "";
-      if (!goal) {
-        simpleTaskStatus = { status: "failed", running: false, error: "Enter a task first." };
-        renderSimpleTaskStatus();
+    function currentCeoAgentId() {
+      const rooted = (orgChart || []).find(node => node && node.id);
+      if (rooted?.id) return rooted.id;
+      const ceo = (agents || []).find(agent => `${agent.role || ""} ${agent.name || ""}`.toLowerCase().includes("ceo")
+        || `${agent.role || ""}`.toLowerCase().includes("chief executive"));
+      return ceo?.id || "ceo";
+    }
+
+    async function sendTaskCeoMessage() {
+      const input = document.getElementById("designed-task-goal");
+      const message = (input?.value || "").trim();
+      if (!selectedTaskId || !message) {
         return;
       }
-      simpleTaskStatus = { status: "starting", running: true, goal };
-      selectedTaskId = "";
-      currentTaskScope = new Set();
-      dashboardMode = "simple";
-      dashboardModule = "overview";
-      localStorage.setItem("workforceDashboardMode", dashboardMode);
-      localStorage.setItem("workforceDashboardModule", dashboardModule);
-      renderModeControls();
-      renderSimpleTaskStatus();
-      const res = await fetch("/api/simple-task/start", {
+      const submitLabel = document.getElementById("submit-label");
+      if (submitLabel) submitLabel.textContent = "Sending...";
+      const res = await fetch("/api/agents/steer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal })
+        body: JSON.stringify({
+          agent_id: currentCeoAgentId(),
+          task_id: selectedTaskId,
+          message,
+          action: "message",
+          from_agent_id: "human",
+        })
       });
-      simpleTaskStatus = await res.json();
-      if (!res.ok && !simpleTaskStatus.error) {
-        simpleTaskStatus.error = `HTTP ${res.status}`;
+      const payload = await res.json();
+      if (!res.ok || !payload.ok) {
+        throw new Error(payload.error || payload.message || `HTTP ${res.status}`);
       }
-      if (simpleTaskStatus?.task_id) {
-        selectedTaskId = simpleTaskStatus.task_id;
+      if (input) {
+        input.value = "";
+        onGoalInput(input);
       }
-      renderSimpleTaskStatus();
+      if (submitLabel) submitLabel.textContent = "Send";
       await refresh();
     }
 
+    async function routePrimaryComposerAction() {
+      const input = document.getElementById("designed-task-goal");
+      const message = (input?.value || "").trim();
+      if (selectedTaskId && message) {
+        await sendTaskCeoMessage();
+        return;
+      }
+      await designTaskConfig();
+    }
+
     async function designTaskConfig() {
-      const goal = fieldValue("designed-task-goal", "simple-task-goal", "").trim();
+      const goal = document.getElementById("designed-task-goal").value.trim();
       if (!goal) {
         designedTaskStatus = { status: "failed", running: false, error: "Enter a task goal first." };
         finishDesignedProgress({
@@ -4116,16 +3562,15 @@ HTML = r"""<!doctype html>
         renderDemoStatus();
         return;
       }
-      setBothValues("designed-task-goal", "simple-task-goal", goal);
       designedTaskStatus = { status: "designing", running: true };
       renderDemoStatus();
       const payload = {
         goal,
-        headcount_limit: Number(fieldValue("designed-task-headcount", "simple-designed-task-headcount", runtimeConfig?.designed_task?.headcount_limit || 6)),
-        token_budget: Number(fieldValue("designed-task-token-budget", "simple-designed-task-token-budget", runtimeConfig?.designed_task?.token_budget || 600000)),
-        management_model: fieldValue("designed-task-management-model", "simple-designed-task-management-model", "").trim() || runtimeConfig?.designed_task?.management_model || "openai/gpt-oss-120b:free",
-        worker_model: fieldValue("designed-task-worker-model", "simple-designed-task-worker-model", "").trim() || runtimeConfig?.designed_task?.worker_model || "poolside/laguna-m.1:free",
-        use_llm: fieldChecked("designed-task-use-llm", "simple-designed-task-use-llm", true),
+        headcount_limit: Number(document.getElementById("designed-task-headcount").value || runtimeConfig?.designed_task?.headcount_limit || 6),
+        token_budget: Number(document.getElementById("designed-task-token-budget").value || runtimeConfig?.designed_task?.token_budget || 600000),
+        management_model: document.getElementById("designed-task-management-model").value.trim() || runtimeConfig?.designed_task?.management_model || "openai/gpt-oss-120b:free",
+        worker_model: document.getElementById("designed-task-worker-model").value.trim() || runtimeConfig?.designed_task?.worker_model || "poolside/laguna-m.1:free",
+        use_llm: document.getElementById("designed-task-use-llm").checked,
       };
       startDesignedProgress({
         phase: "request",
@@ -4164,7 +3609,7 @@ HTML = r"""<!doctype html>
         detail: "Model response received. Parsing config JSON and drawing the hierarchy.",
       });
       designedTaskConfig = data.config;
-      setBothValues("designed-task-config-json", "simple-designed-task-config-json", JSON.stringify(designedTaskConfig, null, 2));
+      document.getElementById("designed-task-config-json").value = JSON.stringify(designedTaskConfig, null, 2);
       designedTaskStatus = { status: "draft_ready", running: false, error: "" };
       renderDraftOrganizationTree();
       finishDesignedProgress({
@@ -4177,12 +3622,10 @@ HTML = r"""<!doctype html>
     }
 
     async function startDesignedTask() {
-      const editor = activeField("designed-task-config-json", "simple-designed-task-config-json");
+      const editor = document.getElementById("designed-task-config-json");
       let config;
       try {
-        const text = editor?.value?.trim() || "";
-        config = text ? JSON.parse(text) : designedTaskConfig;
-        if (!config) throw new Error("Design an organization first.");
+        config = JSON.parse(editor.value || "{}");
       } catch (err) {
         designedTaskStatus = { status: "failed", running: false, error: `Invalid JSON: ${err}` };
         finishDesignedProgress({
@@ -4195,7 +3638,6 @@ HTML = r"""<!doctype html>
         return;
       }
       designedTaskConfig = config;
-      setBothValues("designed-task-config-json", "simple-designed-task-config-json", JSON.stringify(config, null, 2));
       renderDraftOrganizationTree();
       designedTaskStatus = { status: "starting", running: true };
       selectedTaskId = "";
@@ -4238,17 +3680,13 @@ HTML = r"""<!doctype html>
     }
 
     function setRuntimeConfigStatus(text) {
-      for (const id of ["runtime-config-status", "runtime-config-status-simple"]) {
-        const status = document.getElementById(id);
-        if (status) status.textContent = text;
-      }
+      const status = document.getElementById("runtime-config-status");
+      if (status) status.textContent = text;
     }
 
     function setTraceExportStatus(html) {
-      for (const id of ["task-trace-export-status", "task-trace-export-status-simple"]) {
-        const status = document.getElementById(id);
-        if (status) status.innerHTML = html;
-      }
+      const status = document.getElementById("task-trace-export-status");
+      if (status) status.innerHTML = html;
     }
 
     async function loadRuntimeConfig() {
@@ -4260,13 +3698,13 @@ HTML = r"""<!doctype html>
         return;
       }
       runtimeConfig = data.config || {};
-      setBothValues("runtime-config-json", "runtime-config-json-simple", JSON.stringify(runtimeConfig, null, 2));
+      document.getElementById("runtime-config-json").value = JSON.stringify(runtimeConfig, null, 2);
       applyRuntimeConfigDefaults();
       setRuntimeConfigStatus(`loaded ${data.path || ""}`.trim());
     }
 
     async function saveRuntimeConfig() {
-      const editor = activeField("runtime-config-json", "runtime-config-json-simple");
+      const editor = document.getElementById("runtime-config-json");
       let config;
       try {
         config = JSON.parse(editor.value || "{}");
@@ -4286,7 +3724,7 @@ HTML = r"""<!doctype html>
         return;
       }
       runtimeConfig = data.config || {};
-      setBothValues("runtime-config-json", "runtime-config-json-simple", JSON.stringify(runtimeConfig, null, 2));
+      editor.value = JSON.stringify(runtimeConfig, null, 2);
       applyRuntimeConfigDefaults();
       setRuntimeConfigStatus(`saved ${data.path || ""}`.trim());
       await refresh();
@@ -4294,60 +3732,18 @@ HTML = r"""<!doctype html>
 
     function applyRuntimeConfigDefaults() {
       const defaults = runtimeConfig?.designed_task || {};
-      setBothValues("designed-task-headcount", "simple-designed-task-headcount", defaults.headcount_limit);
-      setBothValues("designed-task-token-budget", "simple-designed-task-token-budget", defaults.token_budget);
-      setBothValues("designed-task-management-model", "simple-designed-task-management-model", defaults.management_model);
-      setBothValues("designed-task-worker-model", "simple-designed-task-worker-model", defaults.worker_model);
-      setBothChecked("designed-task-use-llm", "simple-designed-task-use-llm", defaults.use_llm);
-      renderSimpleConfigSummary();
-    }
-
-    function renderSimpleConfigSummary() {
-      const host = document.getElementById("simple-config-summary");
-      if (!host) return;
-      const headcount = fieldValue("designed-task-headcount", "simple-designed-task-headcount", runtimeConfig?.designed_task?.headcount_limit || 6);
-      const budget = fieldValue("designed-task-token-budget", "simple-designed-task-token-budget", runtimeConfig?.designed_task?.token_budget || 600000);
-      const manager = fieldValue("designed-task-management-model", "simple-designed-task-management-model", runtimeConfig?.designed_task?.management_model || "openai/gpt-oss-120b:free");
-      const worker = fieldValue("designed-task-worker-model", "simple-designed-task-worker-model", runtimeConfig?.designed_task?.worker_model || "poolside/laguna-m.1:free");
-      const useLlm = fieldChecked("designed-task-use-llm", "simple-designed-task-use-llm", runtimeConfig?.designed_task?.use_llm ?? true);
-      host.textContent = `${headcount} agents · ${Number(budget || 0).toLocaleString()} tokens · ${manager} → ${worker} · ${useLlm ? "LLM design" : "local design"}`;
-    }
-
-    function toggleSimpleConfig() {
-      const panel = document.getElementById("simple-config-panel");
-      const button = document.getElementById("simple-config-toggle");
-      if (!panel || !button) return;
-      const open = !panel.classList.contains("open");
-      panel.classList.toggle("open", open);
-      button.setAttribute("aria-expanded", open ? "true" : "false");
-      button.textContent = open ? "-" : "+";
-    }
-
-    function renderSimpleSystemStatus(data, active, completed, failed, queue, totalAgents) {
-      const host = document.getElementById("simple-system-line");
-      if (!host) return;
-      const taskCount = data.tasks?.length || 0;
-      const queueText = `${queue.active_agents || 0}/${queue.total || 0} queue`;
-      const tokenText = `${Number(data.budget?.tokens_used || 0).toLocaleString()} tokens`;
-      host.innerHTML = [
-        `${totalAgents} agents`,
-        `${active} active`,
-        `${completed} completed`,
-        `${failed} failed`,
-        queueText,
-        tokenText,
-        `${taskCount} tasks`,
-      ].map(item => `<span class="pill">${esc(item)}</span>`).join("");
-    }
-
-    function syncGeneratedTaskConfigEditors(sourceId) {
-      const source = document.getElementById(sourceId);
-      if (!source) return;
-      const targetId = sourceId === "simple-designed-task-config-json"
-        ? "designed-task-config-json"
-        : "simple-designed-task-config-json";
-      const target = document.getElementById(targetId);
-      if (target && target.value !== source.value) target.value = source.value;
+      const setValue = (id, value) => {
+        const element = document.getElementById(id);
+        if (element && value != null) {
+          element.value = value;
+        }
+      };
+      setValue("designed-task-headcount", defaults.headcount_limit);
+      setValue("designed-task-token-budget", defaults.token_budget);
+      setValue("designed-task-management-model", defaults.management_model);
+      setValue("designed-task-worker-model", defaults.worker_model);
+      const useLlm = document.getElementById("designed-task-use-llm");
+      if (useLlm && defaults.use_llm != null) useLlm.checked = Boolean(defaults.use_llm);
     }
 
     async function exportSelectedTaskTrace() {
@@ -4371,7 +3767,7 @@ HTML = r"""<!doctype html>
     }
 
     function readDesignedTaskConfigFromEditor() {
-      const editor = activeField("designed-task-config-json", "simple-designed-task-config-json");
+      const editor = document.getElementById("designed-task-config-json");
       const text = editor?.value?.trim() || "";
       if (!text) return { config: designedTaskConfig, error: "" };
       try {
@@ -4384,32 +3780,26 @@ HTML = r"""<!doctype html>
     }
 
     function renderDraftOrganizationTree() {
-      const views = [
-        { treeHost: document.getElementById("draft-org-tree"), summary: document.getElementById("draft-org-summary"), shell: null },
-        { treeHost: document.getElementById("simple-draft-org-tree"), summary: document.getElementById("simple-draft-org-summary"), shell: document.getElementById("simple-draft-shell") },
-      ].filter(view => view.treeHost && view.summary);
-      if (!views.length) return;
-      const renderViews = (summaryText, html, hasDraft = false) => {
-        for (const view of views) {
-          view.summary.textContent = summaryText;
-          view.treeHost.innerHTML = html;
-          if (view.shell) view.shell.classList.toggle("has-draft", Boolean(hasDraft));
-        }
-      };
+      const treeHost = document.getElementById("draft-org-tree");
+      const summary = document.getElementById("draft-org-summary");
+      if (!treeHost || !summary) return;
       const { config, error } = readDesignedTaskConfigFromEditor();
       if (error) {
-        renderViews("invalid JSON", `<div class="org-placeholder">Cannot render draft tree: ${esc(error)}</div>`, false);
+        summary.textContent = "invalid JSON";
+        treeHost.innerHTML = `<div class="org-placeholder">Cannot render draft tree: ${esc(error)}</div>`;
         return;
       }
       const organization = config?.organization || {};
       const agents = Array.isArray(organization.agents) ? organization.agents : [];
       if (!agents.length) {
-        renderViews("no draft", `<div class="muted">No draft yet.</div>`, false);
+        summary.textContent = "no draft";
+        treeHost.innerHTML = `<div class="muted">No draft yet.</div>`;
         return;
       }
       const tree = buildDraftAgentTree(agents);
       const companyName = organization.company?.name || config?.case?.title || "designed org";
-      renderViews(`${agents.length} agents - ${companyName}`, `<ul class="draft-tree">${tree.map(node => renderDraftAgentNode(node)).join("")}</ul>`, true);
+      summary.textContent = `${agents.length} agents - ${companyName}`;
+      treeHost.innerHTML = `<ul class="draft-tree">${tree.map(node => renderDraftAgentNode(node)).join("")}</ul>`;
     }
 
     function buildDraftAgentTree(agents) {
@@ -4471,9 +3861,7 @@ HTML = r"""<!doctype html>
       const agentCount = agents.length || countNodes(orgChart);
       document.body.classList.toggle("mode-simple", dashboardMode === "simple");
       document.body.classList.toggle("mode-debug", dashboardMode === "debug");
-      document.getElementById("org-summary").textContent = dashboardMode === "simple"
-        ? `${agentCount} agents · ${cfg("dashboard", "simple_level_agent_limit", 8)} shown per level`
-        : `${agentCount} agents - ${dashboardMode} mode - collapse depth ${cfg("dashboard", "collapse_depth", 3)}`;
+      document.getElementById("org-summary").textContent = `${agentCount} agents - ${dashboardMode} mode - collapse depth ${cfg("dashboard", "collapse_depth", 3)}`;
       renderCommunicationPulses();
       document.getElementById("org-chart").innerHTML = orgChart.length
         ? `<ul class="org-tree">${orgChart.map(node => renderOrgNode(node, 0)).join("")}</ul>`
@@ -4487,17 +3875,10 @@ HTML = r"""<!doctype html>
       const debug = document.getElementById("mode-debug");
       if (simple) simple.classList.toggle("active", dashboardMode === "simple");
       if (debug) debug.classList.toggle("active", dashboardMode === "debug");
-      renderModuleControls();
-    }
-
-    function renderModuleControls() {
-      const activeModule = dashboardMode === "simple" ? "overview" : dashboardModule;
-      document.querySelectorAll("[data-module]").forEach(element => {
-        element.classList.toggle("module-active", dashboardMode === "debug" || element.dataset.module === activeModule);
-      });
-      document.querySelectorAll("[data-module-name]").forEach(button => {
-        button.classList.toggle("active", button.dataset.moduleName === activeModule);
-      });
+      const slider = document.getElementById("sb-mode-slider");
+      if (slider) slider.style.transform = dashboardMode === "debug" ? "translateX(100%)" : "translateX(0)";
+      if (simple) simple.style.color = dashboardMode === "simple" ? "#1c1b19" : "#8a867f";
+      if (debug) debug.style.color = dashboardMode === "debug" ? "#1c1b19" : "#8a867f";
     }
 
     function renderCommunicationPulses() {
@@ -4538,10 +3919,6 @@ HTML = r"""<!doctype html>
       if (event.event_type === "human_report_registered") {
         return { kind: "human", text: `${actor} reported to human: ${clip(payload.title || payload.message || "", 80)}` };
       }
-      if ((event.event_type || "").startsWith("human_agent_steer")) {
-        const target = payload.target_agent_id || "agent";
-        return { kind: payload.status === "no_active_session" ? "report" : "human", text: `${actor} steering ${target}: ${clip(payload.message || payload.action || "", 80)}` };
-      }
       if (!isToolCallEvent(event.event_type || "")) return null;
       if (tool === "assign") {
         const target = payload.to_agent_id || payload.assigned_to || payload.target_agent_id || "worker";
@@ -4564,9 +3941,6 @@ HTML = r"""<!doctype html>
     }
 
     function renderOrgNode(node, depth) {
-      if (node.placeholder) {
-        return `<li class="org-node"><div class="org-placeholder">${esc(node.name || "Agents hidden by dashboard state limit.")}</div></li>`;
-      }
       const maxVisible = cfg("dashboard", "max_visible_agents", 80);
       if (visibleNodeCount >= maxVisible && depth > 0) {
         const total = 1 + Number(node.descendant_count || 0);
@@ -4579,25 +3953,17 @@ HTML = r"""<!doctype html>
       const work = (node.current_task_ids || []).join(", ") || "-";
       const children = node.children || [];
       const hasChildren = children.length > 0;
-      const simpleMode = dashboardMode !== "debug";
-      const simpleLevelLimit = Math.max(1, Number(cfg("dashboard", "simple_level_agent_limit", 8)));
-      const displayedChildren = simpleMode && children.length > simpleLevelLimit
-        ? children.slice(0, simpleLevelLimit)
-        : children;
-      const hiddenAtLevel = simpleMode ? Math.max(0, children.length - displayedChildren.length) : 0;
       const collapsed = isNodeCollapsed(node, depth);
       const toggle = hasChildren
         ? `<button class="tree-toggle" data-action="toggle-node" data-agent-id="${esc(node.id)}" data-depth="${esc(depth)}" title="Toggle reports">${collapsed ? "+" : "-"}</button>`
         : "";
       const childrenMarkup = hasChildren
-        ? simpleMode
-          ? `<ul class="org-children">${displayedChildren.map(child => renderOrgNode(child, depth + 1)).join("")}${hiddenAtLevel ? `<li class="org-node simple-overflow-node"><div class="org-placeholder">+${esc(hiddenAtLevel)} more</div></li>` : ""}</ul>`
-          : collapsed
+        ? collapsed
           ? `<ul class="org-children"><li class="org-node"><div class="org-placeholder">${esc(children.length)} direct report(s), ${esc(node.descendant_count || children.length)} total below.</div></li></ul>`
           : `<ul class="org-children">${children.map(child => renderOrgNode(child, depth + 1)).join("")}</ul>`
         : "";
-      if (simpleMode) {
-        return renderSimpleOrgNode({ node, depth, summary, active, work, toggle, childrenMarkup, hasChildren });
+      if (dashboardMode !== "debug") {
+        return renderSimpleOrgNode({ node, depth, summary, active, work, toggle, childrenMarkup });
       }
       return `<li class="org-node">
         <div class="agent-node ${active ? "active" : ""}" data-agent-id="${esc(node.id)}">
@@ -4632,10 +3998,10 @@ HTML = r"""<!doctype html>
       </li>`;
     }
 
-    function renderSimpleOrgNode({ node, summary, active, work, childrenMarkup, hasChildren }) {
+    function renderSimpleOrgNode({ node, summary, active, work, toggle, childrenMarkup }) {
       const status = node.status || "idle";
       return `<li class="org-node">
-        <div class="agent-node simple-agent-node ${active ? "active" : ""} ${hasChildren ? "has-children" : ""}" data-agent-id="${esc(node.id)}">
+        <div class="agent-node simple-agent-node ${active ? "active" : ""}" data-agent-id="${esc(node.id)}">
           <div class="simple-agent-main">
             <div class="agent-title">
               ${renderAgentIcon(node.icon)}
@@ -4645,6 +4011,8 @@ HTML = r"""<!doctype html>
               </div>
             </div>
             <div class="agent-controls">
+              ${toggle}
+              <button data-action="agent-detail" data-agent-detail="${esc(node.id)}">Open</button>
               <span class="status ${statusClass(status)}">${esc(status)}</span>
             </div>
           </div>
@@ -4802,20 +4170,6 @@ HTML = r"""<!doctype html>
 
     function summarizeActivity(activity, node = null) {
       const candidates = [];
-      const outputItems = (activity.full_output || activity.output || []);
-      const output = aggregateOutputItems(outputItems).slice(-1)[0];
-      if (output) {
-        const label = output.stream === "error" ? "Error" : (output.stream || "output");
-        const outputLimit = Math.max(12, cfg("summaries", "max_chars", 140) - label.length - 2);
-        const outputText = String(output.text || "");
-        candidates.push({
-          timestamp: output.timestamp || "",
-          text: `${label}: ${clipTail(outputText, outputLimit)}`,
-          full_text: `${label}: ${outputText.replace(/\s+/g, " ").trim()}`,
-          task_id: output.task_id || "",
-          event_type: output.event_type || "output",
-        });
-      }
       const tool = (activity.tools || []).slice(-1)[0];
       if (tool) {
         const target = tool.target_agent_id ? ` -> ${tool.target_agent_id}` : "";
@@ -4852,7 +4206,7 @@ HTML = r"""<!doctype html>
 
     function compactEventDetail(event) {
       const payload = event.payload || {};
-      const keys = ["tool_name", "requested_tool_name", "assigned_to", "to_agent_id", "target_agent_id", "profile_agent_id", "agent_id", "work_item_id", "kind", "lease_owner", "action", "status", "stream", "returncode", "timed_out", "report_id", "human_report_id", "decision", "title", "message", "url", "trace_path", "run_dir", "prompt_path", "response_path", "raw_response_path", "error_path", "attempt", "attempts", "max_attempts", "next_attempt", "delay_seconds", "doc_id", "request_id", "revision"];
+      const keys = ["tool_name", "requested_tool_name", "assigned_to", "to_agent_id", "target_agent_id", "profile_agent_id", "status", "stream", "returncode", "timed_out", "report_id", "human_report_id", "decision", "title", "message", "url", "trace_path", "run_dir", "prompt_path", "response_path", "raw_response_path", "error_path", "attempt", "max_attempts", "next_attempt", "delay_seconds", "doc_id", "request_id", "revision"];
       return keys.filter(key => payload[key] != null).map(key => `${key}=${clip(payload[key], 120)}`).join(" ");
     }
 
@@ -4942,23 +4296,6 @@ HTML = r"""<!doctype html>
       return null;
     }
 
-    async function loadAgentDetail(agentId) {
-      if (!agentId || agentDetails[agentId] || agentDetailRequests.has(agentId)) return;
-      agentDetailRequests.add(agentId);
-      try {
-        const res = await fetch(`/api/agent?agent_id=${encodeURIComponent(agentId)}`, { cache: "no-store" });
-        const payload = await res.json();
-        if (payload.ok && payload.agent) {
-          agentDetails[agentId] = payload.agent;
-          if (selectedAgentId === agentId) renderAgentDetail();
-        }
-      } catch (err) {
-        console.error(err);
-      } finally {
-        agentDetailRequests.delete(agentId);
-      }
-    }
-
     function renderAgentDetail() {
       const drawer = document.getElementById("agent-detail");
       const backdrop = document.getElementById("agent-backdrop");
@@ -4969,28 +4306,13 @@ HTML = r"""<!doctype html>
         document.body.classList.remove("detail-open");
         return;
       }
-      const baseNode = findNodeById(selectedAgentId) || agents.find(agent => agent.id === selectedAgentId) || {id: selectedAgentId, name: selectedAgentId, role: "", status: ""};
-      const loadedNode = agentDetails[selectedAgentId] || {};
-      if (!agentDetails[selectedAgentId] && (baseNode.has_system_prompt || !baseNode.personal_profile)) loadAgentDetail(selectedAgentId);
-      const node = {
-        ...baseNode,
-        ...loadedNode,
-        activity: baseNode.activity || loadedNode.activity,
-        summary: baseNode.summary || loadedNode.summary,
-        children: baseNode.children || [],
-      };
+      const node = findNodeById(selectedAgentId) || agents.find(agent => agent.id === selectedAgentId) || {id: selectedAgentId, name: selectedAgentId, role: "", status: ""};
       const activity = ensureAgentActivity(selectedAgentId, node.activity);
       const summary = summarizeActivity(activity, node);
-      const summaryFullText = summary.full_text || summary.text || "Idle.";
-      const summaryExpanded = expandedSummaryAgents.has(selectedAgentId);
-      const summaryCanExpand = summaryFullText && summaryFullText !== (summary.text || "");
-      const summaryDisplay = summaryExpanded ? summaryFullText : (summary.text || "Idle.");
       const profile = node.personal_profile || {};
       const work = (node.current_task_ids || []).join(", ") || "-";
       const modelLimits = renderModelLimit(node.model_capabilities);
-      const systemPrompt = node.system_prompt || (node.has_system_prompt ? "Loading system prompt..." : "No system prompt stored for this agent.");
-      const steerSession = steerableSessions.find(session => session.agent_id === selectedAgentId);
-      const steerable = Boolean(steerSession);
+      const systemPrompt = node.system_prompt || "No system prompt stored for this agent.";
       drawer.setAttribute("aria-hidden", "false");
       backdrop.hidden = false;
       document.body.classList.add("detail-open");
@@ -5005,19 +4327,8 @@ HTML = r"""<!doctype html>
         <div class="detail-body">
           <div class="detail-section">
             <h3>Current Summary</h3>
-            <div class="agent-summary ${summary.active ? "active" : ""}"><span class="summary-dot"></span><span class="summary-text ${summaryExpanded ? "summary-text-expanded" : ""}">${esc(summaryDisplay)}</span></div>
-            ${summaryCanExpand ? `<div class="summary-actions"><button data-action="toggle-summary" data-agent-id="${esc(selectedAgentId)}">${summaryExpanded ? "Show Recent" : "Load Previous"}</button></div>` : ""}
+            <div class="agent-summary ${summary.active ? "active" : ""}"><span class="summary-dot"></span><span class="summary-text">${esc(summary.text || "Idle.")}</span></div>
             <div class="agent-meta">tasks: ${esc(work)} - summary mode: ${esc(summary.mode || "local")}</div>
-          </div>
-          <div class="detail-section">
-            <h3>Human Steering</h3>
-            <div class="activity-item">${steerable ? `Live session ${esc(steerSession.run_id || "")}` : "No live steerable session. Messages will be recorded but cannot be injected into a finished or one-shot run."}</div>
-            <textarea id="agent-steer-message" placeholder="Send a steering message to this agent while it is working."></textarea>
-            <div class="demo-actions">
-              <button class="primary-button" data-action="send-agent-steer" data-agent-id="${esc(selectedAgentId)}">Send Steering</button>
-              <button data-action="interrupt-agent" data-agent-id="${esc(selectedAgentId)}">Interrupt</button>
-              <span class="pill" id="agent-steer-status">${steerable ? "live" : "not live"}</span>
-            </div>
           </div>
           <div class="detail-section">
             <h3>Personal Profile</h3>
@@ -5063,7 +4374,7 @@ HTML = r"""<!doctype html>
       eventSource.addEventListener("heartbeat", (message) => {
         const item = JSON.parse(message.data);
         eventCursor = Math.max(eventCursor, item.cursor || 0);
-        if (longRfcDemoStatus?.running || realLlmBenchmarkStatus?.running || claudeSteerDemoStatus?.running || simpleTaskStatus?.running || designedTaskStatus?.running) {
+        if (longRfcDemoStatus?.running || realLlmBenchmarkStatus?.running || claudeSteerDemoStatus?.running || designedTaskStatus?.running) {
           refreshDemoStatus().catch(err => console.error(err));
         }
       });
@@ -5091,7 +4402,6 @@ HTML = r"""<!doctype html>
       orgChart = data.org_chart || [];
       agents = data.agents || [];
       agentActivity = data.agent_activity || {};
-      steerableSessions = data.steerable_sessions || [];
       currentTaskScope = new Set(data.task_filter?.task_ids || []);
       renderTaskFilterOptions(data.all_tasks || data.tasks || []);
       document.getElementById("mission").textContent = `${data.company.name} - ${data.company.mission || "No mission"}`;
@@ -5100,19 +4410,15 @@ HTML = r"""<!doctype html>
       const completed = data.tasks.filter(t => t.status === "completed").length;
       const failed = data.tasks.filter(t => t.status === "failed").length;
       const traceLinks = (data.trace_files || []).slice(-2).map(file => renderFileLink(file.path, file.label || file.run_id || "trace")).join(" ") || "-";
-      const queue = data.work_queue || { total: 0, active_agents: 0, status_counts: {}, items: [] };
-      const totalAgents = data.agent_count || data.agents.length;
       document.getElementById("metrics").innerHTML = [
-        ["Agents", `${totalAgents}${data.budget.headcount_limit ? " / " + data.budget.headcount_limit : ""}`],
+        ["Agents", `${data.agents.length}${data.budget.headcount_limit ? " / " + data.budget.headcount_limit : ""}`],
         ["Active Tasks", active],
         ["Completed", completed],
         ["Failed", failed],
         ["Tokens", `${data.budget.tokens_used} / ${data.budget.token_budget_limit}`],
-        ["Queue", `${queue.active_agents || 0} active / ${queue.total || 0}`],
         ["Trace Files", traceLinks],
         ["Output Events", liveOutput.length],
       ].map(([label, value]) => `<div class="panel span-3"><h2>${esc(label)}</h2><div class="metric">${value}</div></div>`).join("");
-      renderSimpleSystemStatus(data, active, completed, failed, queue, totalAgents);
       document.getElementById("agents").innerHTML = rows(["Agent", "Role", "Status", "Model", "Current Work"], data.agents.map(a => [
         `<button data-action="agent-detail" data-agent-detail="${esc(a.id)}">${esc(a.name)}</button>`,
         esc(a.role),
@@ -5121,6 +4427,10 @@ HTML = r"""<!doctype html>
         esc((a.current_task_ids || []).join(", ") || "-")
       ]));
       renderOrgChart();
+      renderStatusBar(data);
+      renderSidebarTasks(data.all_tasks || data.tasks || [], data.tasks || []);
+      renderPipelineCard();
+      renderHomeHumanReports(data.human_reports || []);
       renderHumanReports(data.human_reports || []);
       renderManagerReports(data.reports || []);
       document.getElementById("tasks").innerHTML = rows(["Task", "Title", "Status", "Assignee"], data.tasks.map(t => [
@@ -5128,15 +4438,6 @@ HTML = r"""<!doctype html>
         esc(t.title),
         `<span class="status ${statusClass(t.status)}">${esc(t.status)}</span>`,
         esc(t.assigned_to || "-")
-      ]));
-      document.getElementById("work-queue").innerHTML = rows(["Work", "Kind", "Agent", "Status", "Model/Tool", "Attempts", "Lease"], (queue.items || []).slice(-200).map(item => [
-        esc(item.work_item_id),
-        esc(item.kind || "-"),
-        esc(item.agent_id || "-"),
-        `<span class="status ${statusClass(item.status)}">${esc(item.status || "-")}</span>`,
-        esc(item.tool_name || item.model || "-"),
-        esc(`${item.attempts || 0}/${item.max_attempts || 0}`),
-        esc(item.lease_owner ? `${item.lease_owner} until ${item.lease_until || "-"}` : "-")
       ]));
       document.getElementById("runs").innerHTML = rows(["Run", "Task", "Agent", "Kind", "Status", "Runtime", "Files"], (data.agent_runs || data.worker_runs).map(r => [
         esc(r.run_id),
@@ -5172,17 +4473,14 @@ HTML = r"""<!doctype html>
     }
 
     function renderTaskFilterOptions(tasks) {
+      const select = document.getElementById("task-filter-select");
+      if (!select) return;
       const current = selectedTaskId;
-      const html = `<option value="">All tasks</option>` + (tasks || []).map(task => {
+      select.innerHTML = `<option value="">All tasks</option>` + (tasks || []).map(task => {
         const label = `${task.task_id} - ${task.title || ""}`.slice(0, 140);
         return `<option value="${esc(task.task_id)}">${esc(label)}</option>`;
       }).join("");
-      for (const id of ["task-filter-select", "task-filter-select-simple"]) {
-        const select = document.getElementById(id);
-        if (!select) continue;
-        select.innerHTML = html;
-        select.value = current;
-      }
+      select.value = current;
     }
 
     function renderFileLink(path, label = "file") {
@@ -5190,61 +4488,16 @@ HTML = r"""<!doctype html>
       return `<a href="/api/file?path=${encodeURIComponent(path)}" target="_blank" rel="noreferrer">${esc(label)}</a>`;
     }
 
-    async function sendAgentSteer(agentId, action = "message") {
-      const status = document.getElementById("agent-steer-status");
-      const input = document.getElementById("agent-steer-message");
-      const message = input?.value?.trim() || "";
-      if (action !== "interrupt" && !message) {
-        if (status) status.textContent = "enter message";
-        return;
-      }
-      if (status) status.textContent = "sending";
-      const res = await fetch("/api/agents/steer", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          agent_id: agentId,
-          task_id: selectedTaskId || undefined,
-          message,
-          action,
-          from_agent_id: "human",
-        })
-      });
-      const payload = await res.json();
-      if (status) status.textContent = payload.ok ? payload.status || "sent" : payload.status || payload.error || "failed";
-      if (payload.ok && input) input.value = "";
-      await refresh();
-    }
-
     document.addEventListener("click", (event) => {
-      const simpleCard = event.target.closest(".simple-agent-node[data-agent-id]");
-      if (simpleCard && !event.target.closest("button, a, input, textarea, select, [data-action]")) {
-        selectedAgentId = simpleCard.dataset.agentId;
-        renderAgentDetail();
-        return;
-      }
       const target = event.target.closest("[data-action]");
       if (!target) return;
       const action = target.dataset.action;
-      if (action === "toggle-simple-config") {
-        toggleSimpleConfig();
-      }
       if (action === "agent-detail") {
         selectedAgentId = target.dataset.agentDetail;
         renderAgentDetail();
       }
       if (action === "close-detail") {
         selectedAgentId = null;
-        renderAgentDetail();
-      }
-      if (action === "toggle-summary") {
-        const agentId = target.dataset.agentId || selectedAgentId;
-        if (!agentId) return;
-        if (expandedSummaryAgents.has(agentId)) {
-          expandedSummaryAgents.delete(agentId);
-        } else {
-          expandedSummaryAgents.add(agentId);
-        }
         renderAgentDetail();
       }
       if (action === "toggle-node") {
@@ -5263,29 +4516,40 @@ HTML = r"""<!doctype html>
       }
       if (action === "set-dashboard-mode") {
         dashboardMode = target.dataset.mode === "debug" ? "debug" : "simple";
-        if (dashboardMode === "simple") {
-          dashboardModule = "overview";
-          localStorage.setItem("workforceDashboardModule", dashboardModule);
-        }
         localStorage.setItem("workforceDashboardMode", dashboardMode);
+        renderModeControls();
         renderOrgChart();
       }
-      if (action === "set-dashboard-module") {
-        dashboardModule = target.dataset.moduleName || "overview";
-        localStorage.setItem("workforceDashboardModule", dashboardModule);
-        renderModuleControls();
+      if (action === "toggle-sidebar") {
+        sidebarCollapsed = !sidebarCollapsed;
+        const sb = document.getElementById("sidebar");
+        if (sb) sb.classList.toggle("collapsed", sidebarCollapsed);
+        localStorage.setItem("workforceSidebarCollapsed", sidebarCollapsed ? "1" : "0");
       }
-      if (action === "send-agent-steer") {
-        sendAgentSteer(target.dataset.agentId || selectedAgentId || "").catch(err => {
-          const status = document.getElementById("agent-steer-status");
-          if (status) status.textContent = String(err);
-        });
+      if (action === "new-task") {
+        selectedTaskId = "";
+        selectedAgentId = null;
+        currentTaskScope = new Set();
+        const goal = document.getElementById("designed-task-goal");
+        if (goal) { goal.value = ""; onGoalInput(goal); goal.focus(); }
+        renderDesignedProgress();
+        const scroll = document.getElementById("main-scroll");
+        if (scroll) scroll.scrollTo({ top: 0, behavior: "smooth" });
+        renderSidebarTasks(lastAllTasks, lastTasks);
+        refresh().catch(err => console.error(err));
       }
-      if (action === "interrupt-agent") {
-        sendAgentSteer(target.dataset.agentId || selectedAgentId || "", "interrupt").catch(err => {
-          const status = document.getElementById("agent-steer-status");
-          if (status) status.textContent = String(err);
-        });
+      if (action === "select-task") {
+        selectedTaskId = target.dataset.taskId || "";
+        selectedAgentId = null;
+        currentTaskScope = new Set();
+        renderSidebarTasks(lastAllTasks, lastTasks);
+        renderDesignedProgress();
+        refresh().catch(err => console.error(err));
+      }
+      if (action === "report-detail") {
+        const scroll = document.getElementById("main-scroll");
+        const section = document.getElementById("home-reports-section");
+        if (scroll && section) scroll.scrollTo({ top: section.offsetTop - 20, behavior: "smooth" });
       }
       if (action === "start-long-rfc-demo") {
         startLongRfcDemo().catch(err => {
@@ -5305,19 +4569,13 @@ HTML = r"""<!doctype html>
           renderDemoStatus();
         });
       }
-      if (action === "start-simple-task") {
-        startSimpleTask().catch(err => {
-          simpleTaskStatus = { status: "failed", running: false, error: String(err) };
-          renderSimpleTaskStatus();
-        });
-      }
       if (action === "design-task-config") {
-        designTaskConfig().catch(err => {
+        routePrimaryComposerAction().catch(err => {
           designedTaskStatus = { status: "failed", running: false, error: String(err) };
           finishDesignedProgress({
             state: "failed",
             phase: "model",
-            title: "Design failed.",
+            title: selectedTaskId ? "Message failed." : "Design failed.",
             detail: String(err),
           });
           renderDemoStatus();
@@ -5347,64 +4605,27 @@ HTML = r"""<!doctype html>
     });
 
     document.addEventListener("change", (event) => {
-      if (event.target?.id === "task-filter-select" || event.target?.id === "task-filter-select-simple") {
+      if (event.target?.id === "task-filter-select") {
         selectedTaskId = event.target.value || "";
-        for (const id of ["task-filter-select", "task-filter-select-simple"]) {
-          const select = document.getElementById(id);
-          if (select) select.value = selectedTaskId;
-        }
         selectedAgentId = null;
         currentTaskScope = new Set();
         refresh().catch(err => console.error(err));
       }
-      if (event.target?.id === "designed-task-use-llm" || event.target?.id === "simple-designed-task-use-llm") {
-        setBothChecked("designed-task-use-llm", "simple-designed-task-use-llm", event.target.checked);
-        renderSimpleConfigSummary();
-      }
     });
 
     document.addEventListener("input", (event) => {
-      const mirrorMap = {
-        "designed-task-headcount": "simple-designed-task-headcount",
-        "simple-designed-task-headcount": "designed-task-headcount",
-        "designed-task-token-budget": "simple-designed-task-token-budget",
-        "simple-designed-task-token-budget": "designed-task-token-budget",
-        "designed-task-management-model": "simple-designed-task-management-model",
-        "simple-designed-task-management-model": "designed-task-management-model",
-        "designed-task-worker-model": "simple-designed-task-worker-model",
-        "simple-designed-task-worker-model": "designed-task-worker-model",
-      };
-      if (mirrorMap[event.target?.id]) {
-        const mirror = document.getElementById(mirrorMap[event.target.id]);
-        if (mirror && mirror.value !== event.target.value) mirror.value = event.target.value;
-        renderSimpleConfigSummary();
-      }
-      if (event.target?.id === "designed-task-config-json" || event.target?.id === "simple-designed-task-config-json") {
-        syncGeneratedTaskConfigEditors(event.target.id);
+      if (event.target?.id === "designed-task-config-json") {
         renderDraftOrganizationTree();
       }
     });
 
-    document.addEventListener("keydown", (event) => {
-      if (event.target?.id === "simple-task-goal" && event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault();
-        const action = designedTaskConfig ? startDesignedTask : designTaskConfig;
-        action().catch(err => {
-          designedTaskStatus = { status: "failed", running: false, error: String(err) };
-          finishDesignedProgress({
-            state: "failed",
-            phase: "request",
-            title: "Request failed.",
-            detail: String(err),
-          });
-          renderDemoStatus();
-        });
-      }
-    });
-
+    sidebarCollapsed = localStorage.getItem("workforceSidebarCollapsed") === "1";
+    const sbInit = document.getElementById("sidebar");
+    if (sbInit) sbInit.classList.toggle("collapsed", sidebarCollapsed);
     renderDraftOrganizationTree();
     renderModeControls();
     renderDesignedProgress();
+    renderPipelineCard();
     loadRuntimeConfig().catch(err => setRuntimeConfigStatus(String(err)));
     refresh().catch(err => console.error(err));
   </script>

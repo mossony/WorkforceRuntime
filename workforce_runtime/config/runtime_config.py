@@ -12,11 +12,21 @@ DEFAULT_RUNTIME_CONFIG_PATH = Path("workforce_runtime_config.json")
 
 DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "runtime": {
-        "db_path": ".workforce_runtime/runtime.sqlite",
+        "store_backend": "mysql",
+        "db_path": "workforce_runtime",
         "workspace_root": ".workforce_runtime",
         "task_trace_dir": "",
         "task_trace_include_file_contents": True,
         "task_trace_max_file_bytes": 500000,
+    },
+    "mysql": {
+        "host": "127.0.0.1",
+        "port": 3306,
+        "username": "workforce",
+        "password": "workforce",
+        "database": "workforce_runtime",
+        "charset": "utf8mb4",
+        "connect_timeout": 10,
     },
     "openrouter": {
         "chat_completions_url": "https://openrouter.ai/api/v1/chat/completions",
@@ -134,6 +144,20 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
         "per_tool_limits": {},
         "allow_same_agent_parallel": False,
     },
+    "agent_inbox": {
+        "backend": "rabbitmq",
+        "rabbitmq": {
+            "host": "127.0.0.1",
+            "port": 5672,
+            "username": "workforce",
+            "password": "workforce",
+            "virtual_host": "/",
+            "exchange": "workforce.agent_inbox",
+            "queue_prefix": "workforce.agent.",
+            "heartbeat": 30,
+            "blocked_connection_timeout": 30,
+        },
+    },
     "execution": {
         "mode": "full_access",
         "sandbox": {
@@ -148,6 +172,10 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
                 "complete_work",
                 "fail_work",
                 "get_work_queue",
+                "get_inbox",
+                "claim_inbox",
+                "complete_inbox",
+                "fail_inbox",
             ],
             "worker_extra_args": {
                 "codex": [],

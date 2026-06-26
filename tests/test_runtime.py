@@ -34,11 +34,10 @@ def test_runtime_initializes_org_and_creates_task(tmp_path: Path) -> None:
         assert assigned_agent.current_task_ids == [task.task_id]
 
         events = runtime.store.list_events()
-        assert [event.event_type for event in events] == [
-            "org_initialized",
-            "task_created",
-            "task_assigned",
-        ]
+        event_types = [event.event_type for event in events]
+        assert event_types[:3] == ["org_initialized", "task_created", "task_assigned"]
+        assert "agent_inbox_item_enqueued" in event_types
+        assert runtime.list_agent_inbox_items(agent_id="codex_worker", status="queued")[0].kind == "assignment"
 
 
 def test_runtime_updates_task_and_registers_report_and_artifact(tmp_path: Path) -> None:
@@ -90,7 +89,9 @@ def test_runtime_updates_task_and_registers_report_and_artifact(tmp_path: Path) 
         assert "report_registered" in event_types
         assert "artifact_registered" in event_types
         assert "manager_review_created" in event_types
-        assert "manager_review_decided" in event_types
+        assert "agent_inbox_item_enqueued" in event_types
+        inbox_items = runtime.list_agent_inbox_items(agent_id="engineering_manager", status="queued")
+        assert any(item.kind == "report_review" and item.payload["report_id"] == "report_001" for item in inbox_items)
 
 
 def test_runtime_records_streaming_agent_output(tmp_path: Path) -> None:
@@ -357,8 +358,6 @@ def test_task_cli_end_to_end(tmp_path: Path) -> None:
     assert json.loads(task_show.stdout)["objective"] == "Fix the failing parser test"
 
     with WorkforceRuntime(db_path) as runtime:
-        assert [event.event_type for event in runtime.store.list_events()] == [
-            "org_initialized",
-            "task_created",
-            "task_assigned",
-        ]
+        event_types = [event.event_type for event in runtime.store.list_events()]
+        assert event_types[:3] == ["org_initialized", "task_created", "task_assigned"]
+        assert "agent_inbox_item_enqueued" in event_types

@@ -75,7 +75,7 @@ class OrgDesigner:
                 },
             ],
             temperature=0.1,
-            max_tokens=1600,
+            max_tokens=min(12000, max(1600, request.headcount_limit * 450)),
             reasoning=True,
             response_format={"type": "json_object"},
         )
@@ -209,7 +209,7 @@ class OrgDesigner:
             ),
             agents=agents[: request.headcount_limit],
         )
-        return _with_system_prompts(organization)
+        return _ensure_requested_headcount(organization, request=request, manager_id=manager_id, department=department)
 
 
 def organization_from_mapping(data: dict[str, Any], *, request: OrgDesignRequest) -> Organization:
@@ -264,7 +264,7 @@ def organization_from_mapping(data: dict[str, Any], *, request: OrgDesignRequest
         repaired.append(agent)
 
     organization = Organization(company=company, agents=repaired)
-    return _with_system_prompts(organization)
+    return _ensure_requested_headcount(organization, request=request)
 
 
 def organization_to_yaml(organization: Organization) -> str:
@@ -301,7 +301,8 @@ Return JSON only:
 }}
 
 Constraints:
-- Headcount must be between 3 and {request.headcount_limit}.
+    - Return exactly {request.headcount_limit} agents unless impossible.
+    - Company headcount_limit must be {request.headcount_limit}.
 - Use {request.management_model} for CEO, HR, VPs, and managers.
 - Use {request.worker_model} for terminal workers.
 - Include exactly one root CEO with manager_id null.
@@ -322,6 +323,73 @@ def _with_system_prompts(organization: Organization) -> Organization:
         for agent in organization.agents
     ]
     return organization.model_copy(update={"agents": agents})
+
+
+def _ensure_requested_headcount(
+    organization: Organization,
+    *,
+    request: OrgDesignRequest,
+    manager_id: str | None = None,
+    department: str | None = None,
+) -> Organization:
+    target = request.headcount_limit
+    agents = list(organization.agents[:target])
+    if len(agents) >= target:
+        company = organization.company.model_copy(update={"headcount_limit": target})
+        return _with_system_prompts(organization.model_copy(update={"company": company, "agents": agents}))
+
+    known_ids = {agent.id for agent in agents}
+    parent_id = manager_id or _default_worker_manager_id(agents)
+    role_department = department or _default_worker_department(agents, request=request)
+    goal_kind = _goal_kind(request.goal)
+    role = "Research Analyst" if goal_kind == "research" else "Implementation Specialist"
+    responsibility = (
+        "Investigate an assigned research slice and report evidence"
+        if goal_kind == "research"
+        else "Implement an assigned work slice and report evidence"
+    )
+    ratio = min(0.08, max(0.01, 0.45 / max(target, 1)))
+    next_index = 1
+    while len(agents) < target:
+        agent_id = f"worker_{next_index:02d}"
+        next_index += 1
+        if agent_id in known_ids:
+            continue
+        known_ids.add(agent_id)
+        agents.append(
+            AgentProfile(
+                id=agent_id,
+                name=f"{role} {next_index - 1} Agent",
+                role=role,
+                department=role_department,
+                manager_id=parent_id,
+                worker_type="openrouter_worker",
+                model=request.worker_model,
+                responsibilities=[responsibility, "Submit artifacts and structured reports"],
+                permissions=[READ_REPO, SUBMIT_ARTIFACT, REPORT],
+                budget=_budget(request.token_budget, ratio),
+            )
+        )
+
+    company = organization.company.model_copy(update={"headcount_limit": target})
+    return _with_system_prompts(organization.model_copy(update={"company": company, "agents": agents}))
+
+
+def _default_worker_manager_id(agents: list[AgentProfile]) -> str | None:
+    for agent in reversed(agents):
+        if DELEGATE_TASK in agent.permissions and agent.manager_id is not None:
+            return agent.id
+    for agent in agents:
+        if agent.manager_id is None:
+            return agent.id
+    return agents[0].id if agents else None
+
+
+def _default_worker_department(agents: list[AgentProfile], *, request: OrgDesignRequest) -> str:
+    for agent in reversed(agents):
+        if agent.department and agent.department != "Executive":
+            return agent.department
+    return "Research" if _goal_kind(request.goal) == "research" else "Engineering"
 
 
 def _goal_kind(goal: str) -> str:

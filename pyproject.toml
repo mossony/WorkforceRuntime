@@ -9,7 +9,9 @@ description = "Organization runtime for coordinating third-party AI worker agent
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "pika>=1.3",
   "pexpect>=4.9",
+  "pymysql>=1.1",
   "pydantic>=2.7",
   "pyyaml>=6.0",
 ]

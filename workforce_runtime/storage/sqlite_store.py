@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 
 from workforce_runtime.core.agent_profile import AgentProfile
+from workforce_runtime.core.agent_inbox import AgentInboxItem, AgentInboxItemStatus
 from workforce_runtime.core.agent_personal_profile import AgentPersonalProfile
 from workforce_runtime.core.artifact import Artifact
 from workforce_runtime.core.events import Event
@@ -46,6 +47,23 @@ class SQLiteStore(RuntimeStore):
                 agent_id TEXT PRIMARY KEY,
                 payload TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS agent_inbox_items (
+                inbox_item_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                task_id TEXT,
+                priority INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_inbox_items_agent_status
+                ON agent_inbox_items(agent_id, status, priority DESC, created_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_agent_inbox_items_task
+                ON agent_inbox_items(task_id);
 
             CREATE TABLE IF NOT EXISTS tasks (
                 task_id TEXT PRIMARY KEY,
@@ -157,6 +175,67 @@ class SQLiteStore(RuntimeStore):
     def list_agents(self) -> list[AgentProfile]:
         rows = self._conn.execute("SELECT payload FROM agents ORDER BY id").fetchall()
         return [AgentProfile.model_validate_json(row["payload"]) for row in rows]
+
+    def save_agent_inbox_item(self, item: AgentInboxItem) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO agent_inbox_items (
+                inbox_item_id, agent_id, status, kind, task_id, priority, created_at, updated_at, payload
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(inbox_item_id) DO UPDATE SET
+                agent_id = excluded.agent_id,
+                status = excluded.status,
+                kind = excluded.kind,
+                task_id = excluded.task_id,
+                priority = excluded.priority,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at,
+                payload = excluded.payload
+            """,
+            (
+                item.inbox_item_id,
+                item.agent_id,
+                item.status,
+                item.kind,
+                item.task_id,
+                item.priority,
+                item.created_at.isoformat(),
+                item.updated_at.isoformat(),
+                item.model_dump_json(),
+            ),
+        )
+        self._conn.commit()
+
+    def get_agent_inbox_item(self, inbox_item_id: str) -> AgentInboxItem | None:
+        row = self._conn.execute(
+            "SELECT payload FROM agent_inbox_items WHERE inbox_item_id = ?",
+            (inbox_item_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return AgentInboxItem.model_validate_json(row["payload"])
+
+    def list_agent_inbox_items(
+        self,
+        *,
+        agent_id: str | None = None,
+        status: AgentInboxItemStatus | None = None,
+    ) -> list[AgentInboxItem]:
+        where: list[str] = []
+        params: list[str] = []
+        if agent_id is not None:
+            where.append("agent_id = ?")
+            params.append(agent_id)
+        if status is not None:
+            where.append("status = ?")
+            params.append(status)
+        sql = "SELECT payload FROM agent_inbox_items"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY priority DESC, created_at, inbox_item_id"
+        rows = self._conn.execute(sql, params).fetchall()
+        return [AgentInboxItem.model_validate_json(row["payload"]) for row in rows]
 
     def save_agent_personal_profile(self, profile: AgentPersonalProfile) -> None:
         self._conn.execute(

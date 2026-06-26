@@ -4,6 +4,10 @@
 
 It treats agents as employees, tasks as contracts, reports as structured management communication, budgets as payroll, and tools as governed capabilities.
 
+Default local runtime services are MySQL and RabbitMQ. See
+[Runtime Dependencies](docs/runtime_dependencies.md) for Docker commands,
+ports, credentials, and storage behavior.
+
 The goal is not to build another coding agent, another agent loop, or another prompt framework. The goal is to build the governance layer above existing agents: a runtime that can organize, delegate, supervise, budget, evaluate, and coordinate large numbers of third-party worker agents in a way that resembles a human company.
 
 In the initial version, Workforce Runtime does not implement its own agent loop. All worker agents are third-party executors such as **Codex** and **Claude Code**. Workforce Runtime provides the organizational structure, task lifecycle, reporting protocol, MCP interface, worker adapters, budget control, permission model, and human-readable execution logs.

@@ -14,12 +14,16 @@ from workforce_runtime.mcp.tools.get_org_context import get_org_context
 from workforce_runtime.mcp.tools.get_task_context import get_task_context
 from workforce_runtime.mcp.tools.assign import assign
 from workforce_runtime.mcp.tools.check_progress import check_progress
+from workforce_runtime.mcp.tools.claim_inbox import claim_inbox
 from workforce_runtime.mcp.tools.claim_work import claim_work
+from workforce_runtime.mcp.tools.complete_inbox import complete_inbox
 from workforce_runtime.mcp.tools.complete_work import complete_work
 from workforce_runtime.mcp.tools.decide_tool_request import decide_tool_request
 from workforce_runtime.mcp.tools.discuss import discuss
 from workforce_runtime.mcp.tools.enqueue_work import enqueue_work
+from workforce_runtime.mcp.tools.fail_inbox import fail_inbox
 from workforce_runtime.mcp.tools.fail_work import fail_work
+from workforce_runtime.mcp.tools.get_inbox import get_inbox
 from workforce_runtime.mcp.tools.get_work_queue import get_work_queue
 from workforce_runtime.mcp.tools.hire import hire
 from workforce_runtime.mcp.tools.get_task_dossier import get_task_dossier
@@ -58,6 +62,10 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "request_permission": request_permission,
     "get_task_context": get_task_context,
     "get_org_context": get_org_context,
+    "get_inbox": get_inbox,
+    "claim_inbox": claim_inbox,
+    "complete_inbox": complete_inbox,
+    "fail_inbox": fail_inbox,
     "enqueue_work": enqueue_work,
     "claim_work": claim_work,
     "complete_work": complete_work,
@@ -65,7 +73,17 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "get_work_queue": get_work_queue,
 }
 
-QUEUE_CONTROL_TOOLS = {"enqueue_work", "claim_work", "complete_work", "fail_work", "get_work_queue"}
+QUEUE_CONTROL_TOOLS = {
+    "enqueue_work",
+    "claim_work",
+    "complete_work",
+    "fail_work",
+    "get_work_queue",
+    "get_inbox",
+    "claim_inbox",
+    "complete_inbox",
+    "fail_inbox",
+}
 
 
 def tool_specs() -> list[dict[str, object]]:
@@ -291,6 +309,62 @@ def tool_specs() -> list[dict[str, object]]:
         },
         {"name": "get_task_context", "description": "Get task context.", "inputSchema": {"type": "object"}},
         {"name": "get_org_context", "description": "Get organization context.", "inputSchema": {"type": "object"}},
+        {
+            "name": "get_inbox",
+            "description": "Return queued or leased inbox items for an agent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from_agent_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["queued", "leased", "completed", "failed", "cancelled", "interrupted"],
+                    },
+                },
+            },
+        },
+        {
+            "name": "claim_inbox",
+            "description": "Claim the next RabbitMQ-backed inbox items for an agent.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["agent_id"],
+                "properties": {
+                    "from_agent_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "lease_owner": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1},
+                },
+            },
+        },
+        {
+            "name": "complete_inbox",
+            "description": "Mark an inbox item completed after the agent handles it.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["inbox_item_id"],
+                "properties": {
+                    "from_agent_id": {"type": "string"},
+                    "inbox_item_id": {"type": "string"},
+                    "result": {"type": "object"},
+                },
+            },
+        },
+        {
+            "name": "fail_inbox",
+            "description": "Fail or requeue an inbox item.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["inbox_item_id", "error"],
+                "properties": {
+                    "from_agent_id": {"type": "string"},
+                    "inbox_item_id": {"type": "string"},
+                    "error": {"type": "string"},
+                    "retry": {"type": "boolean"},
+                },
+            },
+        },
         {
             "name": "enqueue_work",
             "description": "Queue an LLM request, tool call, or worker run for bounded scheduler execution.",
@@ -553,6 +627,8 @@ def _summarize_tool_arguments(arguments: dict[str, object]) -> dict[str, object]
         "doc_type",
         "profile_agent_id",
         "agent_id",
+        "inbox_item_id",
+        "status",
         "work_item_id",
         "kind",
         "lease_owner",
@@ -588,7 +664,9 @@ def _summarize_tool_result(result: dict[str, object]) -> dict[str, object]:
         "profile_agent_id",
         "revision",
         "work_item_id",
+        "inbox_item_id",
         "claimed_count",
+        "count",
     ):
         if result.get(key) is not None:
             summary[key] = str(result[key])
@@ -636,7 +714,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     config = load_runtime_config(args.config)
-    db_path = args.db or Path(str(config.get("runtime", {}).get("db_path") or ".workforce_runtime/runtime.sqlite"))
+    db_path = args.db or Path(str(config.get("runtime", {}).get("db_path") or "workforce_runtime"))
     serve_stdio(db_path, config=config)
 
 

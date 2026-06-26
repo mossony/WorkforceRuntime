@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from workforce_runtime.core.agent_profile import AgentProfile
+from workforce_runtime.core.agent_inbox import AgentInboxItem, AgentInboxItemStatus
 from workforce_runtime.core.agent_personal_profile import AgentPersonalProfile
 from workforce_runtime.core.artifact import Artifact
 from workforce_runtime.core.events import Event
@@ -40,6 +41,17 @@ class RuntimeStore(Protocol):
     def get_agent(self, agent_id: str) -> AgentProfile | None: ...
 
     def list_agents(self) -> list[AgentProfile]: ...
+
+    def save_agent_inbox_item(self, item: AgentInboxItem) -> None: ...
+
+    def get_agent_inbox_item(self, inbox_item_id: str) -> AgentInboxItem | None: ...
+
+    def list_agent_inbox_items(
+        self,
+        *,
+        agent_id: str | None = None,
+        status: AgentInboxItemStatus | None = None,
+    ) -> list[AgentInboxItem]: ...
 
     def save_agent_personal_profile(self, profile: AgentPersonalProfile) -> None: ...
 

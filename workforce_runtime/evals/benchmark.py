@@ -87,6 +87,7 @@ def run_benchmark_case(
     organization_override: Organization | None = None,
     llm_json_config: dict[str, Any] | None = None,
     source_excerpt_chars: int = 20000,
+    on_root_task_created: Callable[[str], None] | None = None,
 ) -> BenchmarkResult:
     db = Path(db_path)
     workdir = Path(workspace)
@@ -136,6 +137,8 @@ def run_benchmark_case(
             acceptance_criteria=case.acceptance_criteria,
             required_artifacts=case.expected_artifacts,
         )
+        if on_root_task_created:
+            on_root_task_created(root_task.task_id)
 
         current_task_id = root_task.task_id
         for index, assigner in enumerate(chain[:-1]):

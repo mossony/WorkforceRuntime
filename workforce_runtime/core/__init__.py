@@ -1,6 +1,13 @@
 """Core contracts and organization model."""
 
 from workforce_runtime.core.agent_profile import AgentProfile, AgentStatus
+from workforce_runtime.core.agent_inbox import (
+    AgentInboxInterruptMode,
+    AgentInboxItem,
+    AgentInboxItemKind,
+    AgentInboxItemStatus,
+    ClaimedAgentInboxItem,
+)
 from workforce_runtime.core.agent_personal_profile import AgentExperience, AgentPersonalProfile
 from workforce_runtime.core.artifact import Artifact
 from workforce_runtime.core.budget import Budget, UsageCost
@@ -15,12 +22,17 @@ from workforce_runtime.core.work_queue import WorkItem, WorkItemKind, WorkItemSt
 
 __all__ = [
     "AgentProfile",
+    "AgentInboxInterruptMode",
+    "AgentInboxItem",
+    "AgentInboxItemKind",
+    "AgentInboxItemStatus",
     "AgentExperience",
     "AgentPersonalProfile",
     "AgentStatus",
     "Artifact",
     "Budget",
     "Company",
+    "ClaimedAgentInboxItem",
     "Event",
     "Organization",
     "ReportContract",

@@ -214,6 +214,8 @@ def run_long_rfc_demo(
             ),
         )
         _pause(delay_seconds)
+        for report in runtime.store.list_reports_by_task(str(worker_task["task_id"])):
+            runtime.review_report(report.report_id, reviewer_id=report.to_agent_id)
 
         reports = runtime.store.list_reports_by_task(str(worker_task["task_id"]))
         review_events = [event for event in runtime.store.list_events() if event.event_type == "manager_review_decided"]

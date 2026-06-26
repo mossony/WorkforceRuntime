@@ -10,9 +10,9 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from workforce_runtime.core import ReportContract, UsageCost
+from workforce_runtime.core import AgentProfile, ReportContract, UsageCost
 from workforce_runtime.dashboard.config import load_dashboard_config
-from workforce_runtime.dashboard.web_dashboard import CODEX_ICON_PATH, build_web_dashboard_state, make_web_dashboard_server
+from workforce_runtime.dashboard.web_dashboard import CODEX_ICON_PATH, HTML, build_web_dashboard_state, make_web_dashboard_server
 from workforce_runtime.server.runtime import WorkforceRuntime
 from workforce_runtime.workers.steering import STEERABLE_SESSIONS
 
@@ -33,6 +33,30 @@ class FakeSteerableSession:
 
     def interrupt(self, *, from_agent_id: str = "human") -> None:
         self.interrupted = True
+
+
+def test_web_dashboard_html_includes_claude_simple_ui() -> None:
+    assert "<title>Workforce Runtime</title>" in HTML
+    assert 'id="app-shell"' in HTML
+    assert 'id="sidebar"' in HTML
+    assert 'id="status-metrics"' in HTML
+    assert 'id="pipeline-card"' in HTML
+    assert "Where should we begin?" in HTML
+    assert 'id="designed-task-goal"' in HTML
+    assert 'id="submit-label"' in HTML
+    assert "Design Org" in HTML
+    assert "New task" in HTML
+    assert "Task history" in HTML
+    assert "simple-agent-node" in HTML
+    assert "simple-agent-summary" in HTML
+    assert "renderSimpleOrg" in HTML
+    assert "body.mode-debug .simple-only" in HTML
+    assert "body.mode-simple .debug-only" in HTML
+    assert 'id="designed-task-config-json"' in HTML
+    assert 'id="designed-task-progress-detail"' in HTML
+    assert 'id="agent-detail"' in HTML
+    assert "function sendTaskCeoMessage" in HTML
+    assert "refresh().catch" in HTML
 
 
 def test_web_dashboard_state_includes_status_replay_and_output(tmp_path: Path) -> None:
@@ -171,6 +195,42 @@ def test_web_dashboard_state_includes_status_replay_and_output(tmp_path: Path) -
     assert state["agent_summaries"]["engineering_manager"]["text"]
     assert "Event Replay" in state["event_replay"]
     assert "Agent Trajectories" in state["trajectories"]
+
+
+def test_task_filtered_org_chart_keeps_idle_agents_in_current_org(tmp_path: Path) -> None:
+    db_path = tmp_path / "runtime.sqlite"
+    with WorkforceRuntime(db_path) as runtime:
+        runtime.initialize_org(EXAMPLE_ORG)
+        runtime.store.save_agent(
+            AgentProfile(
+                id="stale_agent",
+                name="Stale Agent",
+                role="Old Role",
+                department="Old Org",
+                manager_id="ceo",
+                worker_type="generic_cli",
+                system_prompt="You are Stale Agent.\nCompany mission: An older unrelated mission.",
+            )
+        )
+        task = runtime.create_task(
+            title="CEO-only start",
+            objective="Start at the root before subordinates emit task events.",
+            assign_to="ceo",
+        )
+
+        state = build_web_dashboard_state(runtime.store, task_id_filter=task.task_id)
+
+    def flatten(nodes: list[dict[str, object]]) -> set[str]:
+        ids: set[str] = set()
+        for node in nodes:
+            ids.add(str(node["id"]))
+            ids.update(flatten(node.get("children", [])))  # type: ignore[arg-type]
+        return ids
+
+    org_ids = flatten(state["org_chart"])
+    assert state["agent_count"] == 6
+    assert {"ceo", "vp_engineering", "engineering_manager", "codex_worker", "claude_worker", "hr_manager"} <= org_ids
+    assert "stale_agent" not in org_ids
 
 
 def test_web_dashboard_model_migration_clears_stale_agent_errors(tmp_path: Path) -> None:
@@ -316,16 +376,18 @@ def test_web_dashboard_http_endpoints(tmp_path: Path) -> None:
         server.server_close()
         thread.join(timeout=5)
 
-    assert "Workforce Runtime Dashboard" in html
+    assert "<title>Workforce Runtime</title>" in html
+    assert 'id="app-shell"' in html
+    assert 'id="sidebar"' in html
+    assert 'id="status-metrics"' in html
+    assert 'id="pipeline-card"' in html
     assert "Org Chart" in html
     assert "Live Agent Output" in html
     assert "agent-detail" in html
     assert "Details" in html
-    assert "Designed Task Run" in html
     assert "Where should we begin?" in html
-    assert "simple-task-goal" in html
-    assert "simple-design-task-config" in html
-    assert "simple-start-designed-task" in html
+    assert "designed-task-goal" in html
+    assert "submit-label" in html
     assert "Human Reports" in html
     assert "Internal Manager Reports" in html
     assert "Start Long RFC Demo" in html
@@ -541,6 +603,9 @@ def test_web_dashboard_can_design_start_and_filter_task_run(tmp_path: Path) -> N
         draft = json.loads(urlopen(design_request, timeout=5).read().decode())
         assert draft["ok"] is True
         assert draft["config"]["case"]["goal"] == "Write a short local fixture task result."
+        assert draft["config"]["case"]["headcount_limit"] == 4
+        assert draft["config"]["organization"]["company"]["headcount_limit"] == 4
+        assert len(draft["config"]["organization"]["agents"]) == 4
         assert draft["config"]["organization"]["agents"]
 
         draft["config"]["run"]["use_llm"] = False

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import sqlite3
+from uuid import uuid4
 
 import pytest
 
 from workforce_runtime.core import (
+    AgentInboxItem,
     AgentProfile,
     Artifact,
     Budget,
@@ -16,7 +18,7 @@ from workforce_runtime.core import (
     WorkItem,
 )
 from workforce_runtime.server.runtime import WorkforceRuntime
-from workforce_runtime.storage import FileStore, RuntimeStore, SQLiteStore, create_runtime_store
+from workforce_runtime.storage import FileStore, MySQLStore, RuntimeStore, SQLiteStore, create_runtime_store
 
 
 def make_agent() -> AgentProfile:
@@ -134,21 +136,38 @@ def test_sqlite_store_saves_and_loads_agent_task_report_event_and_artifact(tmp_p
         assert store.get_work_item_by_idempotency_key("missing") is None
         assert store.list_work_items(status="queued") == [work_item]
 
+        inbox_item = AgentInboxItem(
+            inbox_item_id="inbox_001",
+            agent_id="codex_worker",
+            kind="assignment",
+            task_id="task_001",
+            from_agent_id="engineering_manager",
+            payload={"task_id": "task_001"},
+        )
+        store.save_agent_inbox_item(inbox_item)
+        assert store.get_agent_inbox_item("inbox_001") == inbox_item
+        assert store.list_agent_inbox_items(agent_id="codex_worker", status="queued") == [inbox_item]
+
 
 def test_sqlite_store_satisfies_runtime_store_protocol(tmp_path) -> None:
     with SQLiteStore(tmp_path / "runtime.sqlite") as store:
         assert isinstance(store, RuntimeStore)
 
 
-def test_runtime_store_factory_currently_supports_sqlite_only(tmp_path) -> None:
+def test_runtime_store_factory_supports_sqlite_and_mysql(tmp_path) -> None:
     store = create_runtime_store("sqlite", tmp_path / "runtime.sqlite")
     try:
         assert isinstance(store, SQLiteStore)
     finally:
         store.close()
 
-    with pytest.raises(ValueError, match="unsupported runtime store backend"):
-        create_runtime_store("mysql", "mysql://localhost/workforce")
+    if not _mysql_available():
+        pytest.skip("MySQL is not available")
+    mysql_store = create_runtime_store("mysql", f"workforce_test_{tmp_path.name}")
+    try:
+        assert isinstance(mysql_store, MySQLStore)
+    finally:
+        mysql_store.close()
 
 
 def test_workforce_runtime_accepts_injected_store_without_owning_it(tmp_path) -> None:
@@ -191,6 +210,35 @@ def test_sqlite_store_lists_events_after_sequence(tmp_path) -> None:
         assert store.list_events_after(2) == []
 
 
+def test_mysql_store_round_trips_core_records(tmp_path) -> None:
+    if not _mysql_available():
+        pytest.skip("MySQL is not available")
+    suffix = uuid4().hex[:8]
+    with MySQLStore(f"workforce_test_{tmp_path.name}") as store:
+        agent = make_agent().model_copy(update={"id": f"codex_worker_{suffix}"})
+        task = make_task().model_copy(update={"task_id": f"task_{suffix}", "assigned_to": agent.id})
+        report = make_report().model_copy(
+            update={"report_id": f"report_{suffix}", "from_agent_id": agent.id, "task_id": task.task_id}
+        )
+        event = Event(
+            event_id=f"event_{suffix}",
+            event_type="task_completed",
+            actor_id=agent.id,
+            task_id=task.task_id,
+        )
+
+        store.save_agent(agent)
+        store.save_task(task)
+        store.save_report(report)
+        store.save_event(event)
+
+        assert store.get_agent(agent.id) == agent
+        assert store.get_task(task.task_id) == task
+        assert store.list_reports_by_task(task.task_id) == [report]
+        assert store.latest_event_sequence() >= 1
+        assert store.list_events_after(0)[-1].event == event
+
+
 def test_file_store_saves_task_scoped_artifacts(tmp_path) -> None:
     store = FileStore(tmp_path)
 
@@ -204,3 +252,12 @@ def test_file_store_saves_task_scoped_artifacts(tmp_path) -> None:
     assert stderr.read_text() == "worker warnings"
     assert diff.read_text().startswith("diff --git")
     assert test_log.read_text() == "1 passed"
+
+
+def _mysql_available() -> bool:
+    try:
+        store = MySQLStore("workforce_probe")
+    except Exception:
+        return False
+    store.close()
+    return True

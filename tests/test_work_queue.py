@@ -225,6 +225,33 @@ def test_mcp_tool_calls_are_queued_in_sandbox_mode(tmp_path: Path) -> None:
     assert "work_item_completed" in event_types
 
 
+def test_mcp_report_normalizes_out_of_range_confidence(tmp_path: Path) -> None:
+    with WorkforceRuntime(tmp_path / "runtime.sqlite") as runtime:
+        runtime.initialize_org(EXAMPLE_ORG)
+        task = runtime.create_task(title="Confidence report", objective="Report with model scale drift.", assign_to="codex_worker")
+        server = MCPServer(runtime)
+
+        reported = _mcp_tool_call(
+            server,
+            "report",
+            {
+                "from_agent_id": "codex_worker",
+                "task_id": task.task_id,
+                "summary": "Completed with a 7.5 out of 10 confidence scale.",
+                "status": "completed",
+                "confidence": 7.5,
+                "work_done": ["reported through MCP"],
+            },
+        )
+        report = runtime.store.list_reports_by_task(task.task_id)[0]
+        events = runtime.store.list_events()
+
+    assert reported["ok"] is True
+    assert reported["confidence"] == 0.75
+    assert report.confidence == 0.75
+    assert any(event.event_type == "mcp_tool_input_normalized" for event in events)
+
+
 def _mcp_tool_call(server: MCPServer, name: str, arguments: dict[str, object]) -> dict[str, object]:
     response = server.handle(
         {

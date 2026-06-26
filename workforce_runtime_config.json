@@ -1,10 +1,20 @@
 {
   "runtime": {
-    "db_path": ".workforce_runtime/runtime.sqlite",
+    "store_backend": "mysql",
+    "db_path": "workforce_runtime",
     "workspace_root": ".workforce_runtime",
     "task_trace_dir": "",
     "task_trace_include_file_contents": true,
     "task_trace_max_file_bytes": 500000
+  },
+  "mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "username": "workforce",
+    "password": "workforce",
+    "database": "workforce_runtime",
+    "charset": "utf8mb4",
+    "connect_timeout": 10
   },
   "openrouter": {
     "chat_completions_url": "https://openrouter.ai/api/v1/chat/completions",
@@ -163,6 +173,32 @@
       "stream": false
     }
   },
+  "model_failover": {
+    "enabled": true,
+    "management_fallback_models": [
+      "openai/gpt-oss-120b:free",
+      "openrouter/owl-alpha",
+      "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "nvidia/nemotron-3-super-120b-a12b:free"
+    ],
+    "worker_fallback_models": [
+      "poolside/laguna-m.1:free",
+      "cohere/north-mini-code:free",
+      "openrouter/owl-alpha",
+      "poolside/laguna-xs.2:free",
+      "openai/gpt-oss-20b:free"
+    ],
+    "unavailable_error_fragments": [
+      "model not found",
+      "model metadata",
+      "no endpoints",
+      "invalid model",
+      "unknown model",
+      "does not exist",
+      "degraded function cannot be invoked",
+      "function cannot be invoked"
+    ]
+  },
   "queue": {
     "max_active_agents": 20,
     "lease_seconds": 300,
@@ -175,32 +211,18 @@
     "per_tool_limits": {},
     "allow_same_agent_parallel": false
   },
-  "execution": {
-    "mode": "full_access",
-    "sandbox": {
-      "provider": "anthropic_sandbox_runtime",
-      "command_prefix": [
-        "srt",
-        "--settings",
-        "{settings_path}"
-      ],
-      "settings_path": "examples/sandbox_runtime_settings.json",
-      "queue_mcp_tools": true,
-      "mcp_tool_queue_timeout_seconds": 30.0,
-      "mcp_tool_queue_excluded_tools": [
-        "enqueue_work",
-        "claim_work",
-        "complete_work",
-        "fail_work",
-        "get_work_queue"
-      ],
-      "worker_extra_args": {
-        "codex": [],
-        "claude_code": [
-          "--dangerously-skip-permissions"
-        ],
-        "claude_code_interactive": []
-      }
+  "agent_inbox": {
+    "backend": "rabbitmq",
+    "rabbitmq": {
+      "host": "127.0.0.1",
+      "port": 5672,
+      "username": "workforce",
+      "password": "workforce",
+      "virtual_host": "/",
+      "exchange": "workforce.agent_inbox",
+      "queue_prefix": "workforce.agent.",
+      "heartbeat": 30,
+      "blocked_connection_timeout": 30
     }
   },
   "icons": {
@@ -250,7 +272,7 @@
       ],
       "command": null,
       "timeout_seconds": 900,
-      "idle_finish_seconds": 2.0,
+      "idle_finish_seconds": 2,
       "input_submit_delay_seconds": 0.35,
       "steer_interrupt_seconds": 0.8
     },
@@ -302,8 +324,8 @@
         "reasoning_enabled": false,
         "stream": true,
         "retry_initial_delay_seconds": 0.5,
-        "retry_backoff_multiplier": 2.0,
-        "retry_max_delay_seconds": 5.0
+        "retry_backoff_multiplier": 2,
+        "retry_max_delay_seconds": 5
       }
     }
   },
@@ -320,8 +342,8 @@
       "reasoning_enabled": false,
       "stream": false,
       "retry_initial_delay_seconds": 0.25,
-      "retry_backoff_multiplier": 2.0,
-      "retry_max_delay_seconds": 2.0
+      "retry_backoff_multiplier": 2,
+      "retry_max_delay_seconds": 2
     },
     "swe_bench": {
       "dataset": "SWE-bench/SWE-bench_Lite",
@@ -330,31 +352,5 @@
       "test_timeout_seconds": 600,
       "setup_timeout_seconds": 900
     }
-  },
-  "model_failover": {
-    "enabled": true,
-    "management_fallback_models": [
-      "openai/gpt-oss-120b:free",
-      "openrouter/owl-alpha",
-      "nvidia/nemotron-3-ultra-550b-a55b:free",
-      "nvidia/nemotron-3-super-120b-a12b:free"
-    ],
-    "worker_fallback_models": [
-      "poolside/laguna-m.1:free",
-      "cohere/north-mini-code:free",
-      "openrouter/owl-alpha",
-      "poolside/laguna-xs.2:free",
-      "openai/gpt-oss-20b:free"
-    ],
-    "unavailable_error_fragments": [
-      "model not found",
-      "model metadata",
-      "no endpoints",
-      "invalid model",
-      "unknown model",
-      "does not exist",
-      "degraded function cannot be invoked",
-      "function cannot be invoked"
-    ]
   }
 }
