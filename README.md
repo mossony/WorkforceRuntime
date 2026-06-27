@@ -7,7 +7,7 @@ CLI workers, and other external executors. Runtime-level OpenRouter API calls
 are reserved for lightweight summaries, model metadata, and legacy eval
 harnesses; real decision-making agents run through Codex or Claude Code.
 
-![Workforce Runtime animation: a single agent grows into an organized AI workforce](docs/workforce-runtime-animation.gif)
+![Workforce Runtime animation: a single agent grows into an organized AI workforce](docs/workforce-runtime-animation.webp)
 
 [Standalone HTML animation source](docs/Workforce%20Runtime%20Animation%20%28standalone%29.html).
 
