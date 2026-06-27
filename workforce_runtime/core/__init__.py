@@ -14,6 +14,15 @@ from workforce_runtime.core.budget import Budget, UsageCost
 from workforce_runtime.core.events import Event
 from workforce_runtime.core.organization import Company, Organization
 from workforce_runtime.core.report import ReportContract
+from workforce_runtime.core.skill import (
+    SkillAssignment,
+    SkillAssignmentTargetType,
+    SkillDefinition,
+    SkillFile,
+    SkillMaterialization,
+    SkillStatus,
+    skill_checksum,
+)
 from workforce_runtime.core.system_prompt import generate_system_prompt
 from workforce_runtime.core.task import TaskContract, TaskStatus
 from workforce_runtime.core.task_document import TaskDocument, TaskDocumentType
@@ -36,6 +45,12 @@ __all__ = [
     "Event",
     "Organization",
     "ReportContract",
+    "SkillAssignment",
+    "SkillAssignmentTargetType",
+    "SkillDefinition",
+    "SkillFile",
+    "SkillMaterialization",
+    "SkillStatus",
     "TaskContract",
     "TaskDocument",
     "TaskDocumentType",
@@ -47,4 +62,5 @@ __all__ = [
     "WorkItemStatus",
     "WorkQueuePolicy",
     "generate_system_prompt",
+    "skill_checksum",
 ]

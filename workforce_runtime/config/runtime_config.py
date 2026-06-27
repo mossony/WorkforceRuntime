@@ -164,6 +164,14 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
             "blocked_connection_timeout": 30,
         },
     },
+    "skills": {
+        "enabled": True,
+        "materialize_on_worker_start": True,
+        "roots": {
+            "codex": ".agents/skills",
+            "claude_code": ".claude/skills",
+        },
+    },
     "external_mcp": {
         "enabled": True,
         "queue_calls": True,
@@ -363,6 +371,7 @@ def dashboard_config_from_runtime(config: dict[str, Any]) -> dict[str, Any]:
         "activity": copy.deepcopy(config.get("activity", {})),
         "summaries": copy.deepcopy(config.get("summaries", {})),
         "queue": copy.deepcopy(config.get("queue", {})),
+        "skills": copy.deepcopy(config.get("skills", {})),
         "execution": copy.deepcopy(config.get("execution", {})),
         "icons": copy.deepcopy(config.get("icons", {})),
         "models": copy.deepcopy(config.get("models", {})),

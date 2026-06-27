@@ -395,6 +395,8 @@ def test_web_dashboard_http_endpoints(tmp_path: Path) -> None:
             urlopen(f"http://{host}:{port}/api/demos/claude-steer/status", timeout=5).read().decode()
         )
         simple_task_status = json.loads(urlopen(f"http://{host}:{port}/api/simple-task/status", timeout=5).read().decode())
+        mcp_settings = json.loads(urlopen(f"http://{host}:{port}/api/settings/mcp", timeout=5).read().decode())
+        skills_settings = json.loads(urlopen(f"http://{host}:{port}/api/settings/skills", timeout=5).read().decode())
         empty_simple_task = Request(
             f"http://{host}:{port}/api/simple-task/start",
             data=json.dumps({"goal": ""}).encode(),
@@ -415,6 +417,56 @@ def test_web_dashboard_http_endpoints(tmp_path: Path) -> None:
             method="POST",
         )
         saved_config = json.loads(urlopen(save_config, timeout=5).read().decode())
+        save_mcp = Request(
+            f"http://{host}:{port}/api/settings/mcp/servers",
+            data=json.dumps(
+                {
+                    "server": {
+                        "id": "docs_mcp",
+                        "url": "https://docs.example.com/mcp/",
+                        "tool_prefix": "docs",
+                        "auth": {"type": "none"},
+                        "allowed_agent_ids": ["*"],
+                        "allowed_tools": ["*"],
+                    }
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        saved_mcp = json.loads(urlopen(save_mcp, timeout=5).read().decode())
+        delete_mcp = Request(
+            f"http://{host}:{port}/api/settings/mcp/servers/docs_mcp",
+            method="DELETE",
+        )
+        deleted_mcp = json.loads(urlopen(delete_mcp, timeout=5).read().decode())
+        create_skill = Request(
+            f"http://{host}:{port}/api/settings/skills",
+            data=json.dumps(
+                {
+                    "name": "dashboard smoke skill",
+                    "description": "Used by the dashboard endpoint test.",
+                    "instructions": "When invoked, respond with dashboard skill smoke.",
+                    "provider_targets": ["codex", "claude_code"],
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        created_skill = json.loads(urlopen(create_skill, timeout=5).read().decode())
+        assign_skill = Request(
+            f"http://{host}:{port}/api/settings/skills/assignments",
+            data=json.dumps(
+                {
+                    "skill_id": created_skill["created"]["skill_id"],
+                    "target_type": "global",
+                    "target_id": "*",
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        assigned_skill = json.loads(urlopen(assign_skill, timeout=5).read().decode())
         updated_config = json.loads(urlopen(f"http://{host}:{port}/api/config", timeout=5).read().decode())
         if CODEX_ICON_PATH.exists():
             codex_icon = urlopen(f"http://{host}:{port}/assets/agent-icons/codex.png", timeout=5).read()
@@ -442,6 +494,8 @@ def test_web_dashboard_http_endpoints(tmp_path: Path) -> None:
     assert "submit-label" in dashboard_js
     assert "run-designed-task" in dashboard_js
     assert "composer-config-panel" in dashboard_js
+    assert "MCP Servers" in dashboard_js
+    assert "Create Skill" in dashboard_js
     assert "Human Reports" in dashboard_js
     assert "Internal Manager Reports" in dashboard_js
     assert "Start Long RFC Demo" in dashboard_js
@@ -465,6 +519,17 @@ def test_web_dashboard_http_endpoints(tmp_path: Path) -> None:
     assert claude_steer_status["status"] == "idle"
     assert simple_task_status["kind"] == "simple-task"
     assert simple_task_status["status"] == "idle"
+    assert mcp_settings["ok"] is True
+    assert skills_settings["ok"] is True
+    assert saved_mcp["ok"] is True
+    assert any(server["id"] == "docs_mcp" for server in saved_mcp["servers"])
+    assert deleted_mcp["ok"] is True
+    assert deleted_mcp["deleted"] == "docs_mcp"
+    assert not any(server["id"] == "docs_mcp" for server in deleted_mcp["servers"])
+    assert created_skill["ok"] is True
+    assert created_skill["created"]["name"] == "dashboard smoke skill"
+    assert assigned_skill["ok"] is True
+    assert assigned_skill["created_assignment"]["target_type"] == "global"
     assert simple_task_error_status == 400
     assert "agents" in state
     assert "event_replay" in state
@@ -474,6 +539,94 @@ def test_web_dashboard_http_endpoints(tmp_path: Path) -> None:
         assert codex_icon.startswith(b"\x89PNG")
     assert ELK_JS_PATH.exists()
     assert elk_js.startswith(b"(function")
+
+
+def test_web_dashboard_mcp_oauth_uses_dashboard_callback_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "runtime.sqlite"
+    with WorkforceRuntime(db_path) as runtime:
+        runtime.initialize_org(EXAMPLE_ORG)
+
+    captured: dict[str, str] = {}
+
+    class FakeOAuthHandle:
+        authorization_url = "https://auth.example.test/authorize"
+        callback_id = "callback123"
+        state = "state123"
+        redirect_uri = ""
+
+        def complete(self, *, code: str, state: str) -> SimpleNamespace:
+            captured["code"] = code
+            captured["state"] = state
+            return SimpleNamespace(
+                server_id="oauth_docs",
+                url="https://docs.example.test/mcp",
+                token_path=tmp_path / "oauth_tokens.json",
+                scopes=("tools.read",),
+                expires_at=123.0,
+            )
+
+    def fake_probe_mcp_auth(url: str, *, timeout_seconds: float = 5.0) -> SimpleNamespace:
+        captured["probe_url"] = url
+        return SimpleNamespace(auth_status="oauth", oauth_metadata=None)
+
+    def fake_start_oauth_login_for_callback(**kwargs: object) -> FakeOAuthHandle:
+        callback_url = str(kwargs["callback_url"])
+        captured["callback_url"] = callback_url
+        handle = FakeOAuthHandle()
+        handle.redirect_uri = f"{callback_url}/{handle.callback_id}"
+        return handle
+
+    monkeypatch.setattr("workforce_runtime.dashboard.web_dashboard.probe_mcp_auth", fake_probe_mcp_auth)
+    monkeypatch.setattr(
+        "workforce_runtime.dashboard.web_dashboard.start_oauth_login_for_callback",
+        fake_start_oauth_login_for_callback,
+    )
+
+    try:
+        server = make_web_dashboard_server(db_path, host="127.0.0.1", port=0)
+    except PermissionError as exc:
+        pytest.skip(f"sandbox disallows local socket binding: {exc}")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    try:
+        start_request = Request(
+            f"http://{host}:{port}/api/settings/mcp/oauth/start",
+            data=json.dumps(
+                {
+                    "server": {
+                        "id": "oauth_docs",
+                        "url": "https://docs.example.test/mcp",
+                        "auth": {"type": "oauth"},
+                    }
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        started = json.loads(urlopen(start_request, timeout=5).read().decode())
+        callback_html = urlopen(
+            f"http://{host}:{port}/api/settings/mcp/oauth/callback/callback123?code=auth-code&state=state123",
+            timeout=5,
+        ).read().decode()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    expected_callback_url = f"http://{host}:{port}/api/settings/mcp/oauth/callback"
+    assert started["ok"] is True
+    assert started["redirect_uri"] == f"{expected_callback_url}/callback123"
+    assert captured["callback_url"] == expected_callback_url
+    assert captured["code"] == "auth-code"
+    assert "Authentication complete" in callback_html
+    with WorkforceRuntime(db_path) as runtime:
+        event_types = [event.event_type for event in runtime.store.list_events()]
+    assert "external_mcp_oauth_started" in event_types
+    assert "external_mcp_oauth_finished" in event_types
 
 
 def test_web_dashboard_agent_steer_endpoint(tmp_path: Path) -> None:

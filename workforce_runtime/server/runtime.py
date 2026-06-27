@@ -18,6 +18,11 @@ from workforce_runtime.core import (
     Event,
     Organization,
     ReportContract,
+    SkillAssignment,
+    SkillAssignmentTargetType,
+    SkillDefinition,
+    SkillFile,
+    SkillMaterialization,
     TaskDocument,
     TaskContract,
     TaskStatus,
@@ -25,12 +30,14 @@ from workforce_runtime.core import (
     WorkItemKind,
     WorkQueuePolicy,
     generate_system_prompt,
+    skill_checksum,
 )
 from workforce_runtime.core.permissions import DELEGATE_TASK, REPORT, REPORT_TO_HUMAN, SUBMIT_ARTIFACT, Capability
 from workforce_runtime.config.model_failover import choose_agent_replacement_model, is_unavailable_model_error
 from workforce_runtime.config.runtime_config import load_runtime_config
 from workforce_runtime.inbox import RabbitMQAgentInboxQueue
 from workforce_runtime.scheduler.manager_review import ManagerReviewDecision, ManagerReviewPolicy
+from workforce_runtime.skills.materializer import effective_skill_checksum, materialize_skill_definition
 from workforce_runtime.storage import RuntimeStore, RuntimeStoreFactory, load_org_from_yaml, runtime_store_factory
 
 
@@ -455,6 +462,274 @@ class WorkforceRuntime:
 
     def list_tasks(self) -> list[TaskContract]:
         return self.store.list_tasks()
+
+    def create_skill(
+        self,
+        *,
+        name: str,
+        description: str,
+        instructions: str = "",
+        files: list[SkillFile | dict[str, object]] | None = None,
+        skill_id: str | None = None,
+        version: str = "1",
+        status: str = "approved",
+        provider_targets: list[str] | None = None,
+        metadata: dict[str, object] | None = None,
+        source: str = "",
+        actor_id: str = "human",
+    ) -> SkillDefinition:
+        self.require_skill_definition_access(actor_id)
+        skill_files = _coerce_skill_files(files)
+        if not any(file.relative_path == "SKILL.md" for file in skill_files):
+            skill_files.insert(
+                0,
+                SkillFile(
+                    relative_path="SKILL.md",
+                    content=_skill_markdown(name=name, description=description, instructions=instructions),
+                ),
+            )
+        skill = SkillDefinition(
+            skill_id=skill_id or f"skill_{_slugify(name, limit=36)}_{uuid4().hex[:8]}",
+            name=name,
+            description=description,
+            version=version,
+            status=status,  # type: ignore[arg-type]
+            provider_targets=provider_targets or ["codex", "claude_code"],
+            files=skill_files,
+            metadata=metadata or {},
+            source=source,
+            checksum=skill_checksum(skill_files),
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        return self.save_skill_definition(skill, actor_id=actor_id)
+
+    def save_skill_definition(self, skill: SkillDefinition, *, actor_id: str | None = None) -> SkillDefinition:
+        self.require_skill_definition_access(actor_id or skill.updated_by)
+        if actor_id is not None:
+            skill = skill.model_copy(update={"updated_by": actor_id, "updated_at": _utc_now()})
+        checksum = skill_checksum(skill.files)
+        if skill.checksum != checksum:
+            skill = skill.model_copy(update={"checksum": checksum, "updated_at": _utc_now()})
+        self.store.save_skill_definition(skill)
+        self.record_event(
+            event_type="skill_definition_saved",
+            actor_id=actor_id or skill.updated_by,
+            payload={
+                "skill_id": skill.skill_id,
+                "name": skill.name,
+                "status": skill.status,
+                "version": skill.version,
+                "provider_targets": skill.provider_targets,
+                "checksum": skill.checksum,
+            },
+        )
+        return skill
+
+    def require_skill(self, skill_id: str) -> SkillDefinition:
+        skill = self.store.get_skill_definition(skill_id)
+        if skill is None:
+            raise KeyError(f"skill not found: {skill_id}")
+        return skill
+
+    def list_skills(self, *, status: str | None = None) -> list[SkillDefinition]:
+        skills = self.store.list_skill_definitions()
+        if status is not None:
+            skills = [skill for skill in skills if skill.status == status]
+        return skills
+
+    def assign_skill(
+        self,
+        *,
+        skill_id: str,
+        target_type: SkillAssignmentTargetType,
+        target_id: str = "*",
+        actor_id: str = "human",
+        enabled: bool = True,
+        materialize_on_start: bool = True,
+        assignment_id: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> SkillAssignment:
+        self.require_skill(skill_id)
+        self.require_skill_assignment_access(actor_id=actor_id, target_type=target_type, target_id=target_id)
+        assignment = SkillAssignment(
+            assignment_id=assignment_id or f"skill_assignment_{uuid4().hex[:12]}",
+            skill_id=skill_id,
+            target_type=target_type,
+            target_id=target_id,
+            enabled=enabled,
+            materialize_on_start=materialize_on_start,
+            created_by=actor_id,
+            updated_at=_utc_now(),
+            metadata=metadata or {},
+        )
+        self.store.save_skill_assignment(assignment)
+        self.record_event(
+            event_type="skill_assigned",
+            actor_id=actor_id,
+            payload={
+                "assignment_id": assignment.assignment_id,
+                "skill_id": skill_id,
+                "target_type": target_type,
+                "target_id": target_id,
+                "enabled": enabled,
+                "materialize_on_start": materialize_on_start,
+            },
+        )
+        return assignment
+
+    def list_skill_assignments(self, *, agent_id: str | None = None) -> list[SkillAssignment]:
+        assignments = self.store.list_skill_assignments()
+        if agent_id is None:
+            return assignments
+        agent = self.store.get_agent(agent_id)
+        if agent is None:
+            raise KeyError(f"agent not found: {agent_id}")
+        return [
+            assignment
+            for assignment in assignments
+            if _skill_assignment_matches_agent(assignment, agent=agent, worker_type=agent.worker_type)
+        ]
+
+    def list_skills_for_agent(self, agent_id: str, *, worker_type: str | None = None) -> list[SkillDefinition]:
+        agent = self.store.get_agent(agent_id)
+        if agent is None:
+            raise KeyError(f"agent not found: {agent_id}")
+        effective_worker_type = worker_type or agent.worker_type
+        skills_by_id = {skill.skill_id: skill for skill in self.store.list_skill_definitions()}
+        matched: dict[str, SkillDefinition] = {}
+        for assignment in self.store.list_skill_assignments():
+            if not assignment.enabled or not assignment.materialize_on_start:
+                continue
+            if not _skill_assignment_matches_agent(assignment, agent=agent, worker_type=effective_worker_type):
+                continue
+            skill = skills_by_id.get(assignment.skill_id)
+            if skill is None or skill.status not in {"approved", "published"}:
+                continue
+            if not _skill_provider_matches(skill.provider_targets, effective_worker_type):
+                continue
+            matched[skill.skill_id] = skill
+        return sorted(matched.values(), key=lambda skill: (skill.name.lower(), skill.skill_id))
+
+    def materialize_agent_skills(
+        self,
+        *,
+        agent_id: str,
+        worker_type: str,
+        workspace: str | Path,
+        task_id: str | None = None,
+        run_id: str = "",
+        actor_id: str = "runtime",
+    ) -> list[SkillMaterialization]:
+        config = load_runtime_config().get("skills", {})
+        if isinstance(config, dict) and not bool(config.get("enabled", True)):
+            return []
+        if isinstance(config, dict) and not bool(config.get("materialize_on_worker_start", True)):
+            return []
+        workspace_path = Path(workspace).resolve()
+        materializations: list[SkillMaterialization] = []
+        for skill in self.list_skills_for_agent(agent_id, worker_type=worker_type):
+            try:
+                target_dir, written = materialize_skill_definition(
+                    skill=skill,
+                    workspace=workspace_path,
+                    worker_type=worker_type,
+                    config=config if isinstance(config, dict) else {},
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad skill should not block a worker run.
+                self.record_event(
+                    event_type="skill_materialization_failed",
+                    actor_id=actor_id,
+                    task_id=task_id,
+                    payload={
+                        "skill_id": skill.skill_id,
+                        "name": skill.name,
+                        "agent_id": agent_id,
+                        "worker_type": worker_type,
+                        "error": _clip_event_text(str(exc)),
+                    },
+                )
+                continue
+            materialization = SkillMaterialization(
+                materialization_id=f"skillmat_{uuid4().hex[:12]}",
+                skill_id=skill.skill_id,
+                agent_id=agent_id,
+                worker_type=worker_type,
+                workspace=str(workspace_path),
+                target_dir=str(target_dir),
+                task_id=task_id,
+                run_id=run_id,
+                checksum=effective_skill_checksum(skill),
+                file_count=len(written),
+                metadata={
+                    "name": skill.name,
+                    "version": skill.version,
+                    "files": [str(path.relative_to(workspace_path)) for path in written],
+                },
+            )
+            self.store.save_skill_materialization(materialization)
+            materializations.append(materialization)
+            self.record_event(
+                event_type="skill_materialized",
+                actor_id=actor_id,
+                task_id=task_id,
+                payload={
+                    "materialization_id": materialization.materialization_id,
+                    "skill_id": skill.skill_id,
+                    "name": skill.name,
+                    "agent_id": agent_id,
+                    "worker_type": worker_type,
+                    "target_dir": str(target_dir),
+                    "file_count": len(written),
+                    "checksum": materialization.checksum,
+                },
+            )
+        return materializations
+
+    def list_skill_materializations(self) -> list[SkillMaterialization]:
+        return self.store.list_skill_materializations()
+
+    def require_skill_assignment_access(
+        self,
+        *,
+        actor_id: str,
+        target_type: SkillAssignmentTargetType,
+        target_id: str,
+    ) -> None:
+        if actor_id in {"human", "system", "runtime"}:
+            return
+        actor = self.store.get_agent(actor_id)
+        if actor is None:
+            raise KeyError(f"agent not found: {actor_id}")
+        if actor.manager_id is None:
+            return
+        if target_type == "agent" and (actor_id == target_id or self.is_manager_of(actor_id, target_id)):
+            return
+        self.record_event(
+            event_type="permission_violation",
+            actor_id=actor_id,
+            payload={
+                "capability": "assign_skill",
+                "target_type": target_type,
+                "target_id": target_id,
+            },
+        )
+        raise PermissionError(f"agent {actor_id} cannot assign skills to {target_type}:{target_id}")
+
+    def require_skill_definition_access(self, actor_id: str) -> None:
+        if actor_id in {"human", "system", "runtime"}:
+            return
+        actor = self.store.get_agent(actor_id)
+        if actor is None:
+            raise KeyError(f"agent not found: {actor_id}")
+        if actor.manager_id is None:
+            return
+        self.record_event(
+            event_type="permission_violation",
+            actor_id=actor_id,
+            payload={"capability": "manage_skill_definition"},
+        )
+        raise PermissionError(f"agent {actor_id} cannot create or update centralized skill definitions")
 
     def upsert_task_document(
         self,
@@ -2083,6 +2358,78 @@ def _clip_payload(payload: dict[str, object], *, limit: int = 500) -> dict[str, 
         else:
             clipped[key] = value
     return clipped
+
+
+def _coerce_skill_files(files: list[SkillFile | dict[str, object]] | None) -> list[SkillFile]:
+    result: list[SkillFile] = []
+    for file in files or []:
+        if isinstance(file, SkillFile):
+            result.append(file)
+        elif isinstance(file, dict):
+            result.append(SkillFile.model_validate(file))
+        else:
+            raise TypeError("skill files must be SkillFile objects or dictionaries")
+    return result
+
+
+def _skill_markdown(*, name: str, description: str, instructions: str) -> str:
+    body = instructions.strip() or description.strip()
+    return (
+        "---\n"
+        f"name: {_json_string(name)}\n"
+        f"description: {_json_string(description)}\n"
+        "---\n\n"
+        f"# {name.strip() or 'Skill'}\n\n"
+        f"{body}\n"
+    )
+
+
+def _json_string(value: str) -> str:
+    import json
+
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _skill_assignment_matches_agent(
+    assignment: SkillAssignment,
+    *,
+    agent: AgentProfile,
+    worker_type: str,
+) -> bool:
+    target_id = assignment.target_id
+    if assignment.target_type == "global":
+        return target_id in {"*", ""}
+    if assignment.target_type == "agent":
+        return target_id == agent.id
+    if assignment.target_type == "role":
+        return _normalized_match(target_id, agent.role)
+    if assignment.target_type == "department":
+        return _normalized_match(target_id, agent.department)
+    if assignment.target_type == "worker_type":
+        return _canonical_worker_type(target_id) == _canonical_worker_type(worker_type)
+    return False
+
+
+def _skill_provider_matches(provider_targets: list[str], worker_type: str) -> bool:
+    if not provider_targets:
+        return True
+    canonical_worker_type = _canonical_worker_type(worker_type)
+    for target in provider_targets:
+        normalized = _canonical_worker_type(target)
+        if normalized in {"*", "all"} or normalized == canonical_worker_type:
+            return True
+    return False
+
+
+def _canonical_worker_type(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized == "claude_code_interactive":
+        return "claude_code"
+    return normalized
+
+
+def _normalized_match(left: str, right: str) -> bool:
+    return " ".join(left.lower().split()) == " ".join(right.lower().split())
 
 
 def _merge_limited(existing: list[str], incoming: list[str], *, limit: int) -> list[str]:

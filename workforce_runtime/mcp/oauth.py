@@ -84,6 +84,38 @@ class OAuthLoginHandle:
             self._callback_server.close()
 
 
+class OAuthCallbackLoginHandle:
+    def __init__(
+        self,
+        *,
+        authorization_url: str,
+        callback_id: str,
+        exchange: _TokenExchange,
+    ) -> None:
+        self.authorization_url = authorization_url
+        self.callback_id = callback_id
+        self.state = exchange.state
+        self.redirect_uri = exchange.redirect_uri
+        self._exchange = exchange
+
+    def complete(self, *, code: str, state: str) -> OAuthLoginResult:
+        if state != self._exchange.state:
+            raise RuntimeError("OAuth callback state did not match the expected state")
+        if not code:
+            raise RuntimeError("OAuth callback was missing code")
+        token_payload = exchange_authorization_code(self._exchange, code)
+        token_record = _stored_token_record(self._exchange, token_payload)
+        save_oauth_tokens(self._exchange.server_id, self._exchange.url, token_record)
+        return OAuthLoginResult(
+            server_id=self._exchange.server_id,
+            url=self._exchange.url,
+            client_id=self._exchange.client_id,
+            token_path=oauth_token_store_path(),
+            scopes=tuple(str(item) for item in token_record.get("scope", "").split() if item),
+            expires_at=token_record.get("expires_at") if isinstance(token_record.get("expires_at"), float | int) else None,
+        )
+
+
 @dataclass(frozen=True)
 class _OAuthCallback:
     code: str
@@ -317,6 +349,65 @@ def start_oauth_login(
     return OAuthLoginHandle(
         authorization_url=authorization_url,
         callback_server=callback_server,
+        exchange=exchange,
+    )
+
+
+def start_oauth_login_for_callback(
+    *,
+    server_id: str,
+    url: str,
+    callback_url: str,
+    metadata: OAuthMetadata | None = None,
+    scopes: list[str] | None = None,
+    client_id: str = "",
+    client_secret: str = "",
+    resource: str = "",
+    timeout_seconds: int = DEFAULT_OAUTH_TIMEOUT_SECONDS,
+) -> OAuthCallbackLoginHandle:
+    if not callback_url:
+        raise ValueError("callback_url is required for dashboard OAuth login")
+    resolved_metadata = metadata or discover_oauth_metadata(url)
+    if resolved_metadata is None:
+        raise RuntimeError(f"MCP server {url} does not advertise OAuth metadata")
+    callback_id = _callback_id_from_url(url)
+    redirect_uri = _redirect_uri(callback_url, "127.0.0.1", 0, callback_id)
+    registered_client = _resolve_oauth_client(
+        metadata=resolved_metadata,
+        client_id=client_id,
+        client_secret=client_secret,
+        redirect_uri=redirect_uri,
+        timeout_seconds=timeout_seconds,
+    )
+    code_verifier = _code_verifier()
+    code_challenge = _code_challenge(code_verifier)
+    state = secrets.token_urlsafe(32)
+    resolved_scopes = tuple(scopes or resolved_metadata.scopes_supported or ())
+    authorization_url = _authorization_url(
+        resolved_metadata,
+        client_id=registered_client["client_id"],
+        redirect_uri=redirect_uri,
+        code_challenge=code_challenge,
+        state=state,
+        scopes=resolved_scopes,
+        resource=resource,
+    )
+    exchange = _TokenExchange(
+        server_id=server_id,
+        url=url,
+        metadata=resolved_metadata,
+        redirect_uri=redirect_uri,
+        code_verifier=code_verifier,
+        state=state,
+        client_id=registered_client["client_id"],
+        client_secret=registered_client.get("client_secret", ""),
+        scopes=resolved_scopes,
+        resource=resource,
+        timeout_seconds=float(timeout_seconds),
+    )
+    return OAuthCallbackLoginHandle(
+        authorization_url=authorization_url,
+        callback_id=callback_id,
         exchange=exchange,
     )
 

@@ -145,6 +145,45 @@ def build_parser() -> argparse.ArgumentParser:
     external_connect.add_argument("--timeout", type=int, default=None)
     external_connect.add_argument("--no-browser", action="store_true")
 
+    skill_parser = subparsers.add_parser("skill", help="Centrally manage Codex/Claude Code skills")
+    skill_subparsers = skill_parser.add_subparsers(dest="skill_command")
+    skill_list = skill_subparsers.add_parser("list", help="List registered skills")
+    skill_list.add_argument("--status", default=None)
+    skill_list.add_argument("--json", action="store_true")
+    skill_assignments = skill_subparsers.add_parser("assignments", help="List skill assignments")
+    skill_assignments.add_argument("--agent-id", default=None)
+    skill_assignments.add_argument("--json", action="store_true")
+    skill_create = skill_subparsers.add_parser("create", help="Create a centrally managed skill")
+    skill_create.add_argument("--name", required=True)
+    skill_create.add_argument("--description", required=True)
+    skill_create.add_argument("--instructions", default="")
+    skill_create.add_argument("--instructions-file", type=Path, default=None)
+    skill_create.add_argument(
+        "--file",
+        action="append",
+        default=[],
+        metavar="RELATIVE_PATH=SOURCE_PATH",
+        help="Add an extra file to the skill bundle.",
+    )
+    skill_create.add_argument("--status", choices=["draft", "approved", "published", "archived"], default="approved")
+    skill_create.add_argument("--provider-target", action="append", default=[])
+    skill_create.add_argument("--source", default="")
+    skill_create.add_argument("--actor-id", default="human")
+    skill_assign = skill_subparsers.add_parser("assign", help="Assign a skill to global, agent, role, department, or worker type")
+    skill_assign.add_argument("skill_id")
+    skill_assign.add_argument("--target-type", choices=["global", "agent", "role", "department", "worker_type"], required=True)
+    skill_assign.add_argument("--target-id", default="*")
+    skill_assign.add_argument("--actor-id", default="human")
+    skill_assign.add_argument("--disabled", action="store_true")
+    skill_assign.add_argument("--no-materialize-on-start", action="store_true")
+    skill_materialize = skill_subparsers.add_parser("materialize", help="Materialize assigned skills for one agent in a workspace")
+    skill_materialize.add_argument("--agent-id", required=True)
+    skill_materialize.add_argument("--worker-type", default=None)
+    skill_materialize.add_argument("--workspace", required=True, type=Path)
+    skill_materialize.add_argument("--task-id", default=None)
+    skill_materialize.add_argument("--run-id", default="")
+    skill_materialize.add_argument("--actor-id", default="runtime")
+
     task_parser = subparsers.add_parser("task", help="Task commands")
     task_subparsers = task_parser.add_subparsers(dest="task_command")
 
@@ -381,6 +420,10 @@ def main(argv: list[str] | None = None) -> None:
         _handle_mcp_external(args, runtime_config)
         return
 
+    if args.command == "skill":
+        _handle_skill(args)
+        return
+
     if args.command == "task" and args.task_command == "create":
         with WorkforceRuntime(args.db) as runtime:
             task = runtime.create_task(
@@ -562,6 +605,98 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     print("Workforce Runtime: organization runtime skeleton is ready.")
+
+
+def _handle_skill(args: argparse.Namespace) -> None:
+    if args.skill_command == "list":
+        with WorkforceRuntime(args.db) as runtime:
+            skills = runtime.list_skills(status=args.status)
+        if args.json:
+            print(json.dumps([skill.model_dump(mode="json") for skill in skills], indent=2))
+            return
+        if not skills:
+            print("No skills.")
+            return
+        for skill in skills:
+            print(f"{skill.skill_id}\t{skill.status}\t{','.join(skill.provider_targets)}\t{skill.name}")
+        return
+
+    if args.skill_command == "assignments":
+        with WorkforceRuntime(args.db) as runtime:
+            assignments = runtime.list_skill_assignments(agent_id=args.agent_id)
+        if args.json:
+            print(json.dumps([assignment.model_dump(mode="json") for assignment in assignments], indent=2))
+            return
+        if not assignments:
+            print("No skill assignments.")
+            return
+        for assignment in assignments:
+            state = "enabled" if assignment.enabled else "disabled"
+            print(f"{assignment.assignment_id}\t{state}\t{assignment.skill_id}\t{assignment.target_type}:{assignment.target_id}")
+        return
+
+    if args.skill_command == "create":
+        instructions = args.instructions
+        if args.instructions_file is not None:
+            instructions = args.instructions_file.read_text()
+        files = _skill_file_arguments(args.file)
+        with WorkforceRuntime(args.db) as runtime:
+            skill = runtime.create_skill(
+                name=args.name,
+                description=args.description,
+                instructions=instructions,
+                files=files,
+                status=args.status,
+                provider_targets=[str(item) for item in args.provider_target] or None,
+                source=args.source,
+                actor_id=args.actor_id,
+            )
+        print(json.dumps(skill.model_dump(mode="json"), indent=2))
+        return
+
+    if args.skill_command == "assign":
+        with WorkforceRuntime(args.db) as runtime:
+            assignment = runtime.assign_skill(
+                skill_id=args.skill_id,
+                target_type=args.target_type,
+                target_id=args.target_id,
+                actor_id=args.actor_id,
+                enabled=not args.disabled,
+                materialize_on_start=not args.no_materialize_on_start,
+            )
+        print(json.dumps(assignment.model_dump(mode="json"), indent=2))
+        return
+
+    if args.skill_command == "materialize":
+        with WorkforceRuntime(args.db) as runtime:
+            agent = runtime.get_agent(args.agent_id)
+            if agent is None:
+                raise SystemExit(f"agent not found: {args.agent_id}")
+            materializations = runtime.materialize_agent_skills(
+                agent_id=args.agent_id,
+                worker_type=args.worker_type or agent.worker_type,
+                workspace=args.workspace,
+                task_id=args.task_id,
+                run_id=args.run_id,
+                actor_id=args.actor_id,
+            )
+        print(json.dumps([item.model_dump(mode="json") for item in materializations], indent=2))
+        return
+
+    raise SystemExit("choose a skill command: list, assignments, create, assign, or materialize")
+
+
+def _skill_file_arguments(values: list[str]) -> list[dict[str, object]]:
+    files: list[dict[str, object]] = []
+    for value in values:
+        if "=" not in value:
+            raise SystemExit(f"skill file must be RELATIVE_PATH=SOURCE_PATH: {value}")
+        relative_path, source_path = value.split("=", 1)
+        source = Path(source_path)
+        if not relative_path.strip():
+            raise SystemExit("skill file relative path cannot be empty")
+        files.append({"relative_path": relative_path.strip(), "content": source.read_text()})
+    return files
 
 
 def _handle_mcp_external(args: argparse.Namespace, runtime_config: dict[str, object]) -> None:

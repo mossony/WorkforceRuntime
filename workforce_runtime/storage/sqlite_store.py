@@ -10,6 +10,7 @@ from workforce_runtime.core.artifact import Artifact
 from workforce_runtime.core.events import Event
 from workforce_runtime.core.organization import Company
 from workforce_runtime.core.report import ReportContract
+from workforce_runtime.core.skill import SkillAssignment, SkillDefinition, SkillMaterialization
 from workforce_runtime.core.task import TaskContract
 from workforce_runtime.core.task_document import TaskDocument
 from workforce_runtime.core.task_trace import TaskTraceExport
@@ -69,6 +70,47 @@ class SQLiteStore(RuntimeStore):
                 task_id TEXT PRIMARY KEY,
                 payload TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS skill_definitions (
+                skill_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_skill_definitions_name
+                ON skill_definitions(name);
+            CREATE INDEX IF NOT EXISTS idx_skill_definitions_status
+                ON skill_definitions(status);
+
+            CREATE TABLE IF NOT EXISTS skill_assignments (
+                assignment_id TEXT PRIMARY KEY,
+                skill_id TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                payload TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_skill_assignments_target
+                ON skill_assignments(target_type, target_id, enabled);
+            CREATE INDEX IF NOT EXISTS idx_skill_assignments_skill
+                ON skill_assignments(skill_id);
+
+            CREATE TABLE IF NOT EXISTS skill_materializations (
+                materialization_id TEXT PRIMARY KEY,
+                skill_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                task_id TEXT,
+                run_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_skill_materializations_agent
+                ON skill_materializations(agent_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_skill_materializations_skill
+                ON skill_materializations(skill_id);
 
             CREATE TABLE IF NOT EXISTS reports (
                 report_id TEXT PRIMARY KEY,
@@ -261,6 +303,106 @@ class SQLiteStore(RuntimeStore):
         rows = self._conn.execute("SELECT payload FROM agent_personal_profiles ORDER BY agent_id").fetchall()
         return [AgentPersonalProfile.model_validate_json(row["payload"]) for row in rows]
 
+    def save_skill_definition(self, skill: SkillDefinition) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO skill_definitions (skill_id, name, status, payload)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(skill_id) DO UPDATE SET
+                name = excluded.name,
+                status = excluded.status,
+                payload = excluded.payload
+            """,
+            (skill.skill_id, skill.name, skill.status, skill.model_dump_json()),
+        )
+        self._conn.commit()
+
+    def get_skill_definition(self, skill_id: str) -> SkillDefinition | None:
+        row = self._conn.execute(
+            "SELECT payload FROM skill_definitions WHERE skill_id = ?",
+            (skill_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SkillDefinition.model_validate_json(row["payload"])
+
+    def list_skill_definitions(self) -> list[SkillDefinition]:
+        rows = self._conn.execute(
+            "SELECT payload FROM skill_definitions ORDER BY name, skill_id",
+        ).fetchall()
+        return [SkillDefinition.model_validate_json(row["payload"]) for row in rows]
+
+    def save_skill_assignment(self, assignment: SkillAssignment) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO skill_assignments (assignment_id, skill_id, target_type, target_id, enabled, payload)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(assignment_id) DO UPDATE SET
+                skill_id = excluded.skill_id,
+                target_type = excluded.target_type,
+                target_id = excluded.target_id,
+                enabled = excluded.enabled,
+                payload = excluded.payload
+            """,
+            (
+                assignment.assignment_id,
+                assignment.skill_id,
+                assignment.target_type,
+                assignment.target_id,
+                1 if assignment.enabled else 0,
+                assignment.model_dump_json(),
+            ),
+        )
+        self._conn.commit()
+
+    def get_skill_assignment(self, assignment_id: str) -> SkillAssignment | None:
+        row = self._conn.execute(
+            "SELECT payload FROM skill_assignments WHERE assignment_id = ?",
+            (assignment_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SkillAssignment.model_validate_json(row["payload"])
+
+    def list_skill_assignments(self) -> list[SkillAssignment]:
+        rows = self._conn.execute(
+            "SELECT payload FROM skill_assignments ORDER BY target_type, target_id, skill_id, assignment_id",
+        ).fetchall()
+        return [SkillAssignment.model_validate_json(row["payload"]) for row in rows]
+
+    def save_skill_materialization(self, materialization: SkillMaterialization) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO skill_materializations (
+                materialization_id, skill_id, agent_id, task_id, run_id, created_at, payload
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(materialization_id) DO UPDATE SET
+                skill_id = excluded.skill_id,
+                agent_id = excluded.agent_id,
+                task_id = excluded.task_id,
+                run_id = excluded.run_id,
+                created_at = excluded.created_at,
+                payload = excluded.payload
+            """,
+            (
+                materialization.materialization_id,
+                materialization.skill_id,
+                materialization.agent_id,
+                materialization.task_id,
+                materialization.run_id,
+                materialization.created_at.isoformat(),
+                materialization.model_dump_json(),
+            ),
+        )
+        self._conn.commit()
+
+    def list_skill_materializations(self) -> list[SkillMaterialization]:
+        rows = self._conn.execute(
+            "SELECT payload FROM skill_materializations ORDER BY created_at, materialization_id",
+        ).fetchall()
+        return [SkillMaterialization.model_validate_json(row["payload"]) for row in rows]
+
     def save_task(self, task: TaskContract) -> None:
         self._conn.execute(
             """
@@ -281,6 +423,11 @@ class SQLiteStore(RuntimeStore):
     def list_tasks(self) -> list[TaskContract]:
         rows = self._conn.execute("SELECT payload FROM tasks ORDER BY task_id").fetchall()
         return [TaskContract.model_validate_json(row["payload"]) for row in rows]
+
+    def delete_task(self, task_id: str) -> bool:
+        cursor = self._conn.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+        self._conn.commit()
+        return cursor.rowcount > 0
 
     def save_report(self, report: ReportContract) -> None:
         self._conn.execute(

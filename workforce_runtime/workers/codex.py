@@ -54,6 +54,14 @@ class CodexWorker:
         task_contract_path = task_dir / "task_contract.json"
         final_message_path = task_dir / "codex-final.md"
         task_contract_path.write_text(task.model_dump_json(indent=2))
+        runtime_context.runtime.materialize_agent_skills(
+            agent_id=runtime_context.agent_id,
+            worker_type="codex",
+            workspace=workspace,
+            task_id=task.task_id,
+            run_id=run_id,
+            actor_id=runtime_context.agent_id,
+        )
 
         prompt = self._build_prompt(task, runtime_context)
         runtime_context.runtime.update_task_status(

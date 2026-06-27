@@ -8,7 +8,12 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import urlopen
 
-from workforce_runtime.mcp.oauth import discover_oauth_metadata, probe_mcp_auth, start_oauth_login
+from workforce_runtime.mcp.oauth import (
+    discover_oauth_metadata,
+    probe_mcp_auth,
+    start_oauth_login,
+    start_oauth_login_for_callback,
+)
 from workforce_runtime.mcp.server import MCPServer
 from workforce_runtime.server.runtime import WorkforceRuntime
 
@@ -104,6 +109,27 @@ def test_oauth_login_stores_token_and_external_mcp_uses_it(tmp_path: Path, monke
     assert token_store.exists()
     assert response["structuredContent"]["ok"] is True
     assert any(call["auth"] == "Bearer stored-access-token" for call in fake_server.calls if call["method"] == "tools/call")
+
+
+def test_oauth_login_for_callback_uses_supplied_redirect_uri(tmp_path: Path, monkeypatch) -> None:
+    token_store = tmp_path / "oauth_tokens.json"
+    monkeypatch.setenv("WORKFORCE_EXTERNAL_MCP_OAUTH_STORE", str(token_store))
+    fake_server = _FakeOAuthMCPHTTPServer()
+    fake_server.start()
+    try:
+        handle = start_oauth_login_for_callback(
+            server_id="oauth_dashboard",
+            url=fake_server.url,
+            callback_url="http://127.0.0.1:8765/api/settings/mcp/oauth/callback",
+            scopes=["tools.read"],
+        )
+        login = handle.complete(code="auth-code", state=handle.state)
+    finally:
+        fake_server.stop()
+
+    assert handle.redirect_uri.startswith("http://127.0.0.1:8765/api/settings/mcp/oauth/callback/")
+    assert login.client_id == "registered-client"
+    assert token_store.exists()
 
 
 def test_external_mcp_clone_tool_uses_central_queue_and_bearer_auth(

@@ -17,6 +17,7 @@ from workforce_runtime.core.artifact import Artifact
 from workforce_runtime.core.events import Event
 from workforce_runtime.core.organization import Company
 from workforce_runtime.core.report import ReportContract
+from workforce_runtime.core.skill import SkillAssignment, SkillDefinition, SkillMaterialization
 from workforce_runtime.core.task import TaskContract
 from workforce_runtime.core.task_document import TaskDocument
 from workforce_runtime.core.task_trace import TaskTraceExport
@@ -119,6 +120,47 @@ class MySQLStore(RuntimeStore):
                 CREATE TABLE IF NOT EXISTS tasks (
                     task_id VARCHAR(255) PRIMARY KEY,
                     payload LONGTEXT NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS skill_definitions (
+                    skill_id VARCHAR(255) PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    status VARCHAR(64) NOT NULL,
+                    payload LONGTEXT NOT NULL,
+                    INDEX idx_skill_definitions_name (name),
+                    INDEX idx_skill_definitions_status (status)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS skill_assignments (
+                    assignment_id VARCHAR(255) PRIMARY KEY,
+                    skill_id VARCHAR(255) NOT NULL,
+                    target_type VARCHAR(64) NOT NULL,
+                    target_id VARCHAR(255) NOT NULL,
+                    enabled TINYINT(1) NOT NULL,
+                    payload LONGTEXT NOT NULL,
+                    INDEX idx_skill_assignments_target (target_type, target_id, enabled),
+                    INDEX idx_skill_assignments_skill (skill_id)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS skill_materializations (
+                    materialization_id VARCHAR(255) PRIMARY KEY,
+                    skill_id VARCHAR(255) NOT NULL,
+                    agent_id VARCHAR(255) NOT NULL,
+                    task_id VARCHAR(255),
+                    run_id VARCHAR(255) NOT NULL,
+                    created_at VARCHAR(64) NOT NULL,
+                    payload LONGTEXT NOT NULL,
+                    INDEX idx_skill_materializations_agent (agent_id, created_at),
+                    INDEX idx_skill_materializations_skill (skill_id)
                 )
                 """
             )
@@ -285,6 +327,64 @@ class MySQLStore(RuntimeStore):
         rows = self._fetchall("SELECT payload FROM agent_personal_profiles ORDER BY agent_id")
         return [AgentPersonalProfile.model_validate_json(row["payload"]) for row in rows]
 
+    def save_skill_definition(self, skill: SkillDefinition) -> None:
+        self._execute_upsert(
+            "skill_definitions",
+            ["skill_id", "name", "status", "payload"],
+            (skill.skill_id, skill.name, skill.status, skill.model_dump_json()),
+        )
+
+    def get_skill_definition(self, skill_id: str) -> SkillDefinition | None:
+        row = self._fetchone("SELECT payload FROM skill_definitions WHERE skill_id = %s", (skill_id,))
+        return None if row is None else SkillDefinition.model_validate_json(row["payload"])
+
+    def list_skill_definitions(self) -> list[SkillDefinition]:
+        rows = self._fetchall("SELECT payload FROM skill_definitions ORDER BY name, skill_id")
+        return [SkillDefinition.model_validate_json(row["payload"]) for row in rows]
+
+    def save_skill_assignment(self, assignment: SkillAssignment) -> None:
+        self._execute_upsert(
+            "skill_assignments",
+            ["assignment_id", "skill_id", "target_type", "target_id", "enabled", "payload"],
+            (
+                assignment.assignment_id,
+                assignment.skill_id,
+                assignment.target_type,
+                assignment.target_id,
+                1 if assignment.enabled else 0,
+                assignment.model_dump_json(),
+            ),
+        )
+
+    def get_skill_assignment(self, assignment_id: str) -> SkillAssignment | None:
+        row = self._fetchone("SELECT payload FROM skill_assignments WHERE assignment_id = %s", (assignment_id,))
+        return None if row is None else SkillAssignment.model_validate_json(row["payload"])
+
+    def list_skill_assignments(self) -> list[SkillAssignment]:
+        rows = self._fetchall(
+            "SELECT payload FROM skill_assignments ORDER BY target_type, target_id, skill_id, assignment_id"
+        )
+        return [SkillAssignment.model_validate_json(row["payload"]) for row in rows]
+
+    def save_skill_materialization(self, materialization: SkillMaterialization) -> None:
+        self._execute_upsert(
+            "skill_materializations",
+            ["materialization_id", "skill_id", "agent_id", "task_id", "run_id", "created_at", "payload"],
+            (
+                materialization.materialization_id,
+                materialization.skill_id,
+                materialization.agent_id,
+                materialization.task_id,
+                materialization.run_id,
+                materialization.created_at.isoformat(),
+                materialization.model_dump_json(),
+            ),
+        )
+
+    def list_skill_materializations(self) -> list[SkillMaterialization]:
+        rows = self._fetchall("SELECT payload FROM skill_materializations ORDER BY created_at, materialization_id")
+        return [SkillMaterialization.model_validate_json(row["payload"]) for row in rows]
+
     def save_task(self, task: TaskContract) -> None:
         self._execute_upsert("tasks", ["task_id", "payload"], (task.task_id, task.model_dump_json()))
 
@@ -295,6 +395,13 @@ class MySQLStore(RuntimeStore):
     def list_tasks(self) -> list[TaskContract]:
         rows = self._fetchall("SELECT payload FROM tasks ORDER BY task_id")
         return [TaskContract.model_validate_json(row["payload"]) for row in rows]
+
+    def delete_task(self, task_id: str) -> bool:
+        with self._conn.cursor() as cursor:
+            cursor.execute("DELETE FROM tasks WHERE task_id = %s", (task_id,))
+            deleted = cursor.rowcount > 0
+        self._conn.commit()
+        return deleted
 
     def save_report(self, report: ReportContract) -> None:
         self._execute_upsert(

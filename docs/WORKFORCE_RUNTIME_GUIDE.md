@@ -234,11 +234,14 @@ Supported auth modes are:
 - OAuth client credentials with `token_url`, `client_id_env`,
   `client_secret_env`, and optional `scope`.
 
-OAuth authorization-code flows are also supported from the CLI. The runtime
-uses MCP well-known OAuth metadata discovery, starts a local loopback callback
-server, opens the authorization URL, exchanges the callback code, and stores
-tokens under `.workforce_runtime/secrets/external_mcp_oauth.json`. Override
-that path with `WORKFORCE_EXTERNAL_MCP_OAUTH_STORE` when needed.
+OAuth authorization-code flows are supported from both the dashboard and the
+CLI. The dashboard uses the running dashboard server as the callback endpoint
+(`/api/settings/mcp/oauth/callback/...`), so Docker deployments should redirect
+back to the exposed dashboard port, usually `http://127.0.0.1:8765`. The CLI
+flow uses MCP well-known OAuth metadata discovery, starts a local loopback
+callback server, opens the authorization URL, exchanges the callback code, and
+stores tokens under `.workforce_runtime/secrets/external_mcp_oauth.json`.
+Override that path with `WORKFORCE_EXTERNAL_MCP_OAUTH_STORE` when needed.
 
 Common commands:
 
@@ -250,7 +253,8 @@ workforce-runtime mcp external connect --id github_copilot --url https://api.git
 ```
 
 The `external_mcp.oauth` config section controls default callback URL, callback
-port, and login timeout for these CLI flows.
+port, and login timeout for CLI flows. Leave `callback_url` empty for dashboard
+OAuth unless you intentionally proxy the dashboard behind another public URL.
 
 ## Storage And Queues
 

@@ -151,14 +151,605 @@ export function initializeDashboard() {
         const kind = taskStatusKind(t.status);
         const selected = t.task_id === selectedTaskId ? " selected" : "";
         const title = t.title || t.task_id;
-        return `<button class="task-item${selected}" data-action="select-task" data-task-id="${esc(t.task_id)}" title="${esc(title)}">
-          <span class="task-item-dot" style="background:${dotColorFor(kind)};border-radius:50%;"></span>
-          <span class="task-item-name">${esc(title)}</span>
-        </button>`;
+        return `<div class="task-item-row${selected}">
+          <button class="task-item${selected}" data-action="select-task" data-task-id="${esc(t.task_id)}" title="${esc(title)}">
+            <span class="task-item-dot" style="background:${dotColorFor(kind)};border-radius:50%;"></span>
+            <span class="task-item-name">${esc(title)}</span>
+          </button>
+          <span class="task-item-actions">
+            <button class="task-item-action" data-action="rename-task" data-task-id="${esc(t.task_id)}" data-title="${esc(title)}" title="Rename task" aria-label="Rename task">
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L6 12l-3 .8.8-3z"></path></svg>
+            </button>
+            <button class="task-item-action" data-action="delete-task" data-task-id="${esc(t.task_id)}" data-title="${esc(title)}" title="Delete task" aria-label="Delete task">
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M5 4.5l.5 8h5l.5-8"></path></svg>
+            </button>
+          </span>
+        </div>`;
       }).join("");
     };
     const html = renderGroup("Active", groups.active) + renderGroup("Completed", groups.completed) + renderGroup("Other", groups.other);
     host.innerHTML = html || `<div class="task-group-label">No tasks</div>`;
+  }
+
+  async function renameTask(taskId, title) {
+    if (!taskId) return;
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/rename`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || res.statusText);
+    }
+    await refresh().catch(err => console.error(err));
+  }
+
+  function startInlineRename(row, taskId, currentTitle) {
+    if (!taskId || row.querySelector(".task-item-rename-input")) return;
+    const button = row.querySelector(".task-item");
+    const input = document.createElement("input");
+    input.className = "task-item-rename-input";
+    input.value = currentTitle;
+    input.setAttribute("aria-label", "Task title");
+    if (button) button.style.display = "none";
+    row.insertBefore(input, row.firstChild);
+    row.classList.add("renaming");
+    input.focus();
+    input.select();
+    let settled = false;
+    const finish = async (commit) => {
+      if (settled) return;
+      settled = true;
+      const next = input.value.trim();
+      if (commit && next && next !== currentTitle) {
+        try {
+          await renameTask(taskId, next);
+          return; // refresh() re-renders the sidebar
+        } catch (err) {
+          console.error(err);
+        }
+      }
+      renderSidebarTasks(lastAllTasks, lastTasks); // revert / cancel
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); finish(true); }
+      else if (event.key === "Escape") { event.preventDefault(); finish(false); }
+    });
+    input.addEventListener("blur", () => finish(true));
+  }
+
+  async function deleteTask(taskId) {
+    if (!taskId) return;
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`, { method: "DELETE" });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      window.alert(`Delete failed: ${data.error || res.statusText}`);
+      return;
+    }
+    if (selectedTaskId === taskId) {
+      selectedTaskId = "";
+      selectedAgentId = null;
+      currentTaskScope = new Set();
+    }
+    await refresh().catch(err => console.error(err));
+  }
+
+  function setSettingsStatus(message, kind = "") {
+    const el = document.getElementById("settings-status");
+    if (!el) return;
+    el.textContent = message || "idle";
+    el.dataset.kind = kind;
+  }
+
+  function renderSettingsNav() {
+    document.querySelectorAll(".sb-settings-button").forEach(button => {
+      button.classList.toggle("active", button.dataset.settingsView === settingsView);
+    });
+  }
+
+  function closeSettingsView() {
+    settingsView = "";
+    document.body.classList.remove("settings-open");
+    const section = document.getElementById("settings-view");
+    if (section) section.hidden = true;
+    renderSettingsNav();
+  }
+
+  function openSettingsView(view) {
+    settingsView = view === "skills" ? "skills" : "mcp";
+    document.body.classList.add("settings-open");
+    const section = document.getElementById("settings-view");
+    if (section) section.hidden = false;
+    renderSettingsNav();
+    renderSettingsView();
+    const scroll = document.getElementById("main-scroll");
+    if (scroll) scroll.scrollTo({ top: 0, behavior: "smooth" });
+    loadSettingsView(settingsView).catch(err => setSettingsStatus(String(err), "error"));
+  }
+
+  async function loadSettingsView(view) {
+    setSettingsStatus("loading...");
+    const endpoint = view === "skills" ? "/api/settings/skills" : "/api/settings/mcp";
+    const res = await fetch(endpoint, { cache: "no-store" });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.error || `failed to load ${view}`);
+    settingsData[view] = data;
+    renderSettingsView();
+    setSettingsStatus(`loaded ${view}`);
+  }
+
+  function renderSettingsView() {
+    const section = document.getElementById("settings-view");
+    if (!section || !settingsView) return;
+    const title = document.getElementById("settings-title");
+    const subtitle = document.getElementById("settings-subtitle");
+    if (title) title.textContent = settingsView === "skills" ? "Skills" : "MCP Servers";
+    if (subtitle) {
+      subtitle.textContent = settingsView === "skills"
+        ? "Create centrally managed native Codex and Claude Code skills, then assign them globally or to selected workers."
+        : "Register external MCP servers once, wrap them centrally, and make them available to selected workers.";
+    }
+    const host = document.getElementById("settings-content");
+    if (!host) return;
+    host.innerHTML = settingsView === "skills" ? renderSkillsSettings() : renderMcpSettings();
+  }
+
+  function renderMcpForm(mode, server = {}) {
+    const authType = server.auth?.type || "none";
+    const transport = server.transport || "http";
+    const option = (value, label, selectedValue) => `<option value="${esc(value)}" ${value === selectedValue ? "selected" : ""}>${esc(label)}</option>`;
+    return `<div class="settings-form mcp-form ${mode === "edit" ? "settings-inline-editor" : ""}" data-mcp-form-mode="${esc(mode)}" data-server-id="${esc(server.id || "")}">
+      <div class="settings-form-row">
+        <label>Server id<input data-field="id" value="${esc(server.id || "")}" placeholder="github_copilot"></label>
+        <label>Tool prefix<input data-field="tool_prefix" value="${esc(server.tool_prefix || server.id || "")}" placeholder="github"></label>
+      </div>
+      <label>HTTP URL<input data-field="url" value="${esc(server.url || "")}" placeholder="https://api.example.com/mcp/"></label>
+      <div class="settings-form-row">
+        <label>Transport<select data-field="transport">
+          ${option("http", "http", transport)}
+          ${option("sse", "sse", transport)}
+        </select></label>
+        <label>Auth<select data-field="auth_type">
+          ${option("none", "none", authType)}
+          ${option("bearer", "bearer env", authType)}
+          ${option("oauth", "oauth", authType)}
+        </select></label>
+      </div>
+      <div class="settings-form-row">
+        <label>Bearer env<input data-field="token_env" value="${esc(server.auth?.token_env || "")}" placeholder="GITHUB_PAT_TOKEN"></label>
+        <label>Timeout seconds<input data-field="timeout_seconds" type="number" min="1" value="${esc(server.timeout_seconds || 30)}"></label>
+      </div>
+      <div class="settings-form-row">
+        <label>Allowed agents<input data-field="allowed_agent_ids" value="${esc((server.allowed_agent_ids || ["*"]).join(", "))}"></label>
+        <label>Allowed tools<input data-field="allowed_tools" value="${esc((server.allowed_tools || ["*"]).join(", "))}"></label>
+      </div>
+      <div class="settings-form-row">
+        <label>Allowed roles<input data-field="allowed_roles" value="${esc((server.allowed_roles || []).join(", "))}" placeholder="Software Engineer, Researcher"></label>
+        <label>Allowed worker types<input data-field="allowed_worker_types" value="${esc((server.allowed_worker_types || []).join(", "))}" placeholder="codex, claude_code"></label>
+      </div>
+      <div class="settings-form-row">
+        <label><span>Enabled</span><input data-field="enabled" type="checkbox" ${server.enabled === false ? "" : "checked"}></label>
+        <label><span>Queue tool calls</span><input data-field="queue_enabled" type="checkbox" ${server.queue?.enabled === false ? "" : "checked"}></label>
+      </div>
+      <div class="settings-actions">
+        <button class="settings-secondary" data-action="${mode === "edit" ? "toggle-mcp-edit" : "toggle-settings-add"}" ${mode === "edit" ? `data-server-id="${esc(server.id || "")}"` : `data-settings-add-view="mcp"`}>Cancel</button>
+        <button class="settings-primary" data-action="save-mcp-server">Save MCP Server</button>
+      </div>
+    </div>`;
+  }
+
+  function renderMcpSettings() {
+    const data = settingsData.mcp || {};
+    const servers = data.servers || [];
+    const cards = servers.length ? servers.map(server => {
+      const authType = server.auth?.type || "none";
+      const enabled = server.enabled !== false;
+      const queueEnabled = server.queue?.enabled !== false;
+      const isEditing = editingMcpServerId === String(server.id || "");
+      return `<div class="settings-list-item settings-expandable-item ${isEditing ? "editing" : ""}">
+        <div class="settings-list-head">
+          <div style="min-width:0;">
+            <div class="settings-list-title">${esc(server.id || "unnamed")}</div>
+            <div class="settings-list-sub">${esc(server.url || "")}</div>
+          </div>
+          <div class="settings-row-actions">
+            <button class="settings-secondary" data-action="toggle-mcp-edit" data-server-id="${esc(server.id || "")}">${isEditing ? "Close" : "Edit"}</button>
+            <button class="settings-danger" data-action="delete-mcp-server" data-server-id="${esc(server.id || "")}">Delete</button>
+          </div>
+        </div>
+        <div class="settings-badges">
+          <span class="settings-badge ${enabled ? "good" : "off"}">${enabled ? "enabled" : "disabled"}</span>
+          <span class="settings-badge">${esc(server.transport || "http")}</span>
+          <span class="settings-badge">${esc(authType)}</span>
+          <span class="settings-badge ${queueEnabled ? "good" : "off"}">queue ${queueEnabled ? "on" : "off"}</span>
+          <span class="settings-badge">prefix ${esc(server.tool_prefix || server.id || "-")}</span>
+        </div>
+        ${isEditing ? renderMcpForm("edit", server) : ""}
+      </div>`;
+    }).join("") : `<div class="settings-empty">No external MCP servers configured.</div>`;
+    const addPanel = settingsAddOpen.mcp ? `
+      <div class="settings-expand-panel">
+        <div class="settings-expand-head">
+          <div>
+            <h2>Add or update server</h2>
+            <div class="settings-list-sub">Save the server into the central runtime config. Workers receive the wrapped MCP clone through Workforce Runtime.</div>
+          </div>
+          <button class="settings-secondary" data-action="toggle-settings-add" data-settings-add-view="mcp">Close</button>
+        </div>
+        ${renderMcpForm("add")}
+      </div>` : "";
+    return `<div class="settings-stack">
+      <div class="settings-toolbar">
+        <div>
+          <h2>Configured MCP servers</h2>
+          <div class="settings-list-sub">${servers.length} server${servers.length === 1 ? "" : "s"} configured</div>
+        </div>
+        <div class="settings-toolbar-actions">
+          <button class="settings-secondary" data-action="refresh-settings">Refresh</button>
+          <button class="settings-primary" data-action="toggle-settings-add" data-settings-add-view="mcp">${settingsAddOpen.mcp ? "Close" : "Add MCP Server"}</button>
+        </div>
+      </div>
+      ${addPanel}
+      <div class="settings-list">${cards}</div>
+    </div>`;
+  }
+
+  function renderSkillsSettings() {
+    const data = settingsData.skills || {};
+    const skills = data.skills || [];
+    const assignments = data.assignments || [];
+    const assignmentCounts = assignments.reduce((acc, item) => {
+      acc[item.skill_id] = (acc[item.skill_id] || 0) + 1;
+      return acc;
+    }, {});
+    const skillCards = skills.length ? skills.map(skill => `
+      <div class="settings-list-item">
+        <div class="settings-list-head">
+          <div style="min-width:0;">
+            <div class="settings-list-title">${esc(skill.name)}</div>
+            <div class="settings-list-sub">${esc(skill.description)}</div>
+          </div>
+          <span class="settings-badge ${["approved", "published"].includes(skill.status) ? "good" : "off"}">${esc(skill.status)}</span>
+        </div>
+        <div class="settings-badges">
+          <span class="settings-badge">${esc(skill.skill_id)}</span>
+          <span class="settings-badge">${esc((skill.provider_targets || []).join(", ") || "-")}</span>
+          <span class="settings-badge">${(skill.files || []).length} files</span>
+          <span class="settings-badge">${assignmentCounts[skill.skill_id] || 0} assignments</span>
+        </div>
+      </div>`).join("") : `<div class="settings-empty">No skills registered yet.</div>`;
+    const options = skills.map(skill => `<option value="${esc(skill.skill_id)}">${esc(skill.name)} - ${esc(skill.skill_id)}</option>`).join("");
+    const assignmentCards = assignments.length ? assignments.slice(-8).reverse().map(item => `
+      <div class="settings-list-item">
+        <div class="settings-list-title">${esc(item.target_type)}:${esc(item.target_id)}</div>
+        <div class="settings-list-sub">${esc(item.skill_id)}</div>
+        <div class="settings-badges">
+          <span class="settings-badge ${item.enabled ? "good" : "off"}">${item.enabled ? "enabled" : "disabled"}</span>
+          <span class="settings-badge ${item.materialize_on_start ? "good" : "off"}">materialize ${item.materialize_on_start ? "on" : "off"}</span>
+        </div>
+      </div>`).join("") : `<div class="settings-empty">No assignments yet.</div>`;
+    const createSkillForm = `<div class="settings-form">
+      <label>Name<input id="skill-name" placeholder="repo-reviewer"></label>
+      <label>Description<input id="skill-description" placeholder="Review repository changes with project conventions."></label>
+      <label>Instructions<textarea id="skill-instructions" placeholder="Write the SKILL.md instructions for Codex and Claude Code..."></textarea></label>
+      <div class="settings-form-row">
+        <label>Status<select id="skill-status"><option value="approved">approved</option><option value="draft">draft</option><option value="published">published</option><option value="archived">archived</option></select></label>
+        <label>Targets<select id="skill-provider-targets" multiple size="2"><option value="codex" selected>Codex</option><option value="claude_code" selected>Claude Code</option></select></label>
+      </div>
+      <div class="settings-actions">
+        <button class="settings-primary" data-action="create-skill">Create Skill</button>
+      </div>
+    </div>`;
+    const assignSkillForm = `<div class="settings-form">
+      <label>Skill<select id="assign-skill-id">${options || `<option value="">Create a skill first</option>`}</select></label>
+      <div class="settings-form-row">
+        <label>Target type<select id="assign-target-type"><option value="global">global</option><option value="agent">agent</option><option value="role">role</option><option value="department">department</option><option value="worker_type">worker_type</option></select></label>
+        <label>Target id<input id="assign-target-id" value="*"></label>
+      </div>
+      <div class="settings-form-row">
+        <label><span>Enabled</span><input id="assign-enabled" type="checkbox" checked></label>
+        <label><span>Materialize on worker start</span><input id="assign-materialize" type="checkbox" checked></label>
+      </div>
+      <div class="settings-actions">
+        <button class="settings-primary" data-action="assign-skill" ${skills.length ? "" : "disabled"}>Assign Skill</button>
+      </div>
+    </div>`;
+    const addPanel = settingsAddOpen.skills ? `
+      <div class="settings-expand-panel">
+        <div class="settings-expand-head">
+          <div>
+            <h2>${settingsSkillAddTab === "assign" ? "Assign skill" : "Create skill"}</h2>
+            <div class="settings-list-sub">${settingsSkillAddTab === "assign" ? "Attach an existing skill to all workers or a specific target." : "Create a centrally managed native Codex/Claude skill."}</div>
+          </div>
+          <button class="settings-secondary" data-action="toggle-settings-add" data-settings-add-view="skills">Close</button>
+        </div>
+        <div class="settings-tabs">
+          <button class="${settingsSkillAddTab === "create" ? "active" : ""}" data-action="set-skill-add-tab" data-skill-add-tab="create">Create skill</button>
+          <button class="${settingsSkillAddTab === "assign" ? "active" : ""}" data-action="set-skill-add-tab" data-skill-add-tab="assign">Assign skill</button>
+        </div>
+        ${settingsSkillAddTab === "assign" ? assignSkillForm : createSkillForm}
+      </div>` : "";
+    return `<div class="settings-stack">
+      <div class="settings-toolbar">
+        <div>
+          <h2>Registered skills</h2>
+          <div class="settings-list-sub">${skills.length} skill${skills.length === 1 ? "" : "s"} · ${assignments.length} assignment${assignments.length === 1 ? "" : "s"}</div>
+        </div>
+        <div class="settings-toolbar-actions">
+          <button class="settings-secondary" data-action="refresh-settings">Refresh</button>
+          <button class="settings-primary" data-action="toggle-settings-add" data-settings-add-view="skills">${settingsAddOpen.skills ? "Close" : "Add Skill"}</button>
+        </div>
+      </div>
+      ${addPanel}
+      <div class="settings-card settings-list-card">
+        <div class="settings-list-head">
+          <h2>Skills</h2>
+        </div>
+        <div class="settings-list">${skillCards}</div>
+      </div>
+      <div class="settings-card settings-list-card">
+        <div class="settings-list-head">
+          <h2>Assignments</h2>
+        </div>
+        <div class="settings-list">${assignmentCards}</div>
+      </div>
+    </div>`;
+  }
+
+  function csvItems(raw, fallback = []) {
+    const items = raw.split(",").map(item => item.trim()).filter(Boolean);
+    return items.length ? items : fallback;
+  }
+
+  function formField(form, field) {
+    return form?.querySelector(`[data-field="${field}"]`);
+  }
+
+  function formValue(form, field, fallback = "") {
+    return String(formField(form, field)?.value || fallback);
+  }
+
+  function formCsvValue(form, field, fallback = []) {
+    return csvItems(formValue(form, field), fallback);
+  }
+
+  function formChecked(form, field) {
+    return Boolean(formField(form, field)?.checked);
+  }
+
+  function clearFieldError(field) {
+    if (!field) return;
+    field.removeAttribute("aria-invalid");
+    const label = field.closest("label");
+    if (label) label.classList.remove("settings-field-invalid");
+    const next = field.nextElementSibling;
+    if (next?.classList?.contains("settings-field-error")) next.remove();
+  }
+
+  function clearFormValidation(form) {
+    form?.querySelectorAll("input, select, textarea").forEach(clearFieldError);
+  }
+
+  function addFieldError(field, message) {
+    if (!field) return;
+    clearFieldError(field);
+    field.setAttribute("aria-invalid", "true");
+    const label = field.closest("label");
+    if (label) label.classList.add("settings-field-invalid");
+    const error = document.createElement("div");
+    error.className = "settings-field-error";
+    error.textContent = message;
+    field.insertAdjacentElement("afterend", error);
+  }
+
+  function applyFormErrors(form, errors) {
+    clearFormValidation(form);
+    for (const error of errors) {
+      addFieldError(error.field, error.message);
+    }
+    const first = errors[0]?.field;
+    if (first) first.focus({ preventScroll: true });
+    return errors.length === 0;
+  }
+
+  function requireField(errors, field, message) {
+    if (!String(field?.value || "").trim()) {
+      errors.push({ field, message });
+    }
+  }
+
+  function validateMcpForm(form, payload) {
+    const errors = [];
+    requireField(errors, formField(form, "id"), "Server id is required.");
+    requireField(errors, formField(form, "url"), "HTTP URL is required.");
+    if (payload.server.auth?.type === "bearer") {
+      requireField(errors, formField(form, "token_env"), "Bearer auth needs a token environment variable.");
+    }
+    const urlField = formField(form, "url");
+    const url = String(urlField?.value || "").trim();
+    if (url) {
+      try {
+        const parsed = new URL(url);
+        if (!["http:", "https:"].includes(parsed.protocol)) {
+          errors.push({ field: urlField, message: "Use an http or https URL." });
+        }
+      } catch {
+        errors.push({ field: urlField, message: "Enter a valid URL." });
+      }
+    }
+    const timeoutField = formField(form, "timeout_seconds");
+    const timeout = Number(timeoutField?.value || 0);
+    if (!Number.isFinite(timeout) || timeout <= 0) {
+      errors.push({ field: timeoutField, message: "Timeout must be greater than 0." });
+    }
+    return applyFormErrors(form, errors);
+  }
+
+  function validateSkillCreateForm() {
+    const form = document.getElementById("skill-name")?.closest(".settings-form");
+    const errors = [];
+    requireField(errors, document.getElementById("skill-name"), "Skill name is required.");
+    requireField(errors, document.getElementById("skill-description"), "Description is required.");
+    return applyFormErrors(form, errors);
+  }
+
+  function validateSkillAssignForm() {
+    const form = document.getElementById("assign-skill-id")?.closest(".settings-form");
+    const errors = [];
+    requireField(errors, document.getElementById("assign-skill-id"), "Choose a skill to assign.");
+    requireField(errors, document.getElementById("assign-target-id"), "Target id is required. Use * for global.");
+    return applyFormErrors(form, errors);
+  }
+
+  function selectedOptions(id) {
+    const el = document.getElementById(id);
+    if (!el) return [];
+    return Array.from(el.selectedOptions || []).map(option => option.value).filter(Boolean);
+  }
+
+  function mcpPayloadFromForm(form) {
+    return {
+      server: {
+        id: formValue(form, "id"),
+        tool_prefix: formValue(form, "tool_prefix"),
+        url: formValue(form, "url"),
+        transport: formValue(form, "transport", "http"),
+        auth: {
+          type: formValue(form, "auth_type", "none"),
+          token_env: formValue(form, "token_env"),
+        },
+        timeout_seconds: Number(formValue(form, "timeout_seconds", "30")),
+        allowed_agent_ids: formCsvValue(form, "allowed_agent_ids", ["*"]),
+        allowed_tools: formCsvValue(form, "allowed_tools", ["*"]),
+        allowed_roles: formCsvValue(form, "allowed_roles"),
+        allowed_worker_types: formCsvValue(form, "allowed_worker_types"),
+        enabled: formChecked(form, "enabled"),
+        queue_enabled: formChecked(form, "queue_enabled"),
+      }
+    };
+  }
+
+  async function startMcpOauth(server, oauthWindow) {
+    setSettingsStatus("starting OAuth...");
+    const res = await fetch("/api/settings/mcp/oauth/start", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ server }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.error || "failed to start OAuth");
+    if (oauthWindow && !oauthWindow.closed) {
+      oauthWindow.location = data.authorization_url;
+    } else if (data.authorization_url) {
+      window.open(data.authorization_url, "_blank", "noopener,noreferrer");
+    }
+    setSettingsStatus("OAuth window opened. Complete authorization in the new tab.");
+  }
+
+  async function saveMcpServer(target) {
+    const form = target?.closest(".mcp-form");
+    if (!form) throw new Error("MCP form not found");
+    const payload = mcpPayloadFromForm(form);
+    if (!validateMcpForm(form, payload)) {
+      setSettingsStatus("Fix the required MCP fields.", "error");
+      return;
+    }
+    const wantsOauth = payload.server.auth?.type === "oauth";
+    const oauthWindow = wantsOauth ? window.open("about:blank", "_blank") : null;
+    if (oauthWindow) {
+      oauthWindow.document.write("<p style='font-family:system-ui;padding:18px;'>Preparing OAuth authorization...</p>");
+    }
+    try {
+      setSettingsStatus("saving MCP server...");
+      const res = await fetch("/api/settings/mcp/servers", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok || data.ok === false) throw new Error(data.error || "failed to save MCP server");
+      settingsData.mcp = data;
+      settingsAddOpen.mcp = false;
+      editingMcpServerId = "";
+      renderSettingsView();
+      setSettingsStatus(`saved ${data.saved?.id || "server"}`);
+      if (wantsOauth) {
+        await startMcpOauth(data.saved || payload.server, oauthWindow);
+      }
+    } catch (err) {
+      if (oauthWindow && !oauthWindow.closed) oauthWindow.close();
+      throw err;
+    }
+  }
+
+  async function deleteMcpServer(serverId) {
+    const id = String(serverId || "").trim();
+    if (!id) throw new Error("MCP server id is required");
+    if (!window.confirm(`Delete MCP server "${id}"?`)) return;
+    setSettingsStatus(`deleting ${id}...`);
+    const res = await fetch(`/api/settings/mcp/servers/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.error || "failed to delete MCP server");
+    settingsData.mcp = data;
+    if (editingMcpServerId === id) editingMcpServerId = "";
+    renderSettingsView();
+    setSettingsStatus(`deleted ${id}`);
+  }
+
+  async function createSkill() {
+    if (!validateSkillCreateForm()) {
+      setSettingsStatus("Fix the required skill fields.", "error");
+      return;
+    }
+    const payload = {
+      name: document.getElementById("skill-name")?.value || "",
+      description: document.getElementById("skill-description")?.value || "",
+      instructions: document.getElementById("skill-instructions")?.value || "",
+      status: document.getElementById("skill-status")?.value || "approved",
+      provider_targets: selectedOptions("skill-provider-targets"),
+      source: "dashboard",
+    };
+    setSettingsStatus("creating skill...");
+    const res = await fetch("/api/settings/skills", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.error || "failed to create skill");
+    settingsData.skills = data;
+    settingsAddOpen.skills = false;
+    renderSettingsView();
+    setSettingsStatus(`created ${data.created?.name || "skill"}`);
+  }
+
+  async function assignSkill() {
+    if (!validateSkillAssignForm()) {
+      setSettingsStatus("Fix the required assignment fields.", "error");
+      return;
+    }
+    const payload = {
+      skill_id: document.getElementById("assign-skill-id")?.value || "",
+      target_type: document.getElementById("assign-target-type")?.value || "global",
+      target_id: document.getElementById("assign-target-id")?.value || "*",
+      enabled: Boolean(document.getElementById("assign-enabled")?.checked),
+      materialize_on_start: Boolean(document.getElementById("assign-materialize")?.checked),
+    };
+    setSettingsStatus("assigning skill...");
+    const res = await fetch("/api/settings/skills/assignments", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.error || "failed to assign skill");
+    settingsData.skills = data;
+    settingsAddOpen.skills = false;
+    renderSettingsView();
+    setSettingsStatus("assignment saved");
   }
 
   const PIPELINE_STEPS = [
@@ -426,7 +1017,7 @@ export function initializeDashboard() {
         <div class="simple-agent-work">${esc(work)}</div>
       </button>`;
     }).join("");
-    canvas.innerHTML = `<svg class="simple-org-edge-layer" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${edgeMarkup}</svg>${cardMarkup}`;
+    canvas.innerHTML = `<svg class="simple-org-edge-layer" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><g transform="translate(${padding} ${padding})">${edgeMarkup}</g></svg>${cardMarkup}`;
   }
 
   async function renderSimpleTaskOrg(data) {
@@ -658,6 +1249,11 @@ export function initializeDashboard() {
   let collapsedNodes = new Set();
   let selectedAgentId = null;
   let selectedTaskId = "";
+  let settingsView = "";
+  let settingsData = { mcp: null, skills: null };
+  let settingsAddOpen = { mcp: false, skills: false };
+  let settingsSkillAddTab = "create";
+  let editingMcpServerId = "";
   let currentTaskScope = new Set();
   let visibleNodeCount = 0;
   let dashboardMode = localStorage.getItem("workforceDashboardMode") || "simple";
@@ -1445,7 +2041,7 @@ export function initializeDashboard() {
           </div>
           <div class="agent-controls">
             ${toggle}
-            <button data-action="agent-detail" data-agent-detail="${esc(node.id)}">Details</button>
+            <button class="secondary-button" data-action="agent-detail" data-agent-detail="${esc(node.id)}">Details</button>
             <span class="status ${statusClass(node.status)}">${esc(node.status)}</span>
           </div>
         </div>
@@ -1478,7 +2074,7 @@ export function initializeDashboard() {
           </div>
           <div class="agent-controls">
             ${toggle}
-            <button data-action="agent-detail" data-agent-detail="${esc(node.id)}">Open</button>
+            <button class="secondary-button" data-action="agent-detail" data-agent-detail="${esc(node.id)}">Open</button>
             <span class="status ${statusClass(status)}">${esc(status)}</span>
           </div>
         </div>
@@ -1788,7 +2384,7 @@ export function initializeDashboard() {
           <h3>${esc(node.name || node.id)}</h3>
           <div class="muted">${esc(node.role || "")} - ${esc(node.worker_type || "")} - <span class="status ${statusClass(node.status)}">${esc(node.status || "")}</span></div>
         </div>
-        <button data-action="close-detail">Close</button>
+        <button class="secondary-button" data-action="close-detail">Close</button>
       </div>
       <div class="detail-body">
         <div class="detail-section">
@@ -2017,7 +2613,44 @@ export function initializeDashboard() {
       if (sb) sb.classList.toggle("collapsed", sidebarCollapsed);
       localStorage.setItem("workforceSidebarCollapsed", sidebarCollapsed ? "1" : "0");
     }
+    if (action === "open-settings") {
+      selectedAgentId = null;
+      openSettingsView(target.dataset.settingsView || "mcp");
+    }
+    if (action === "refresh-settings") {
+      if (settingsView) loadSettingsView(settingsView).catch(err => setSettingsStatus(String(err), "error"));
+    }
+    if (action === "toggle-settings-add") {
+      const view = target.dataset.settingsAddView || settingsView;
+      settingsAddOpen[view] = !settingsAddOpen[view];
+      if (view === "mcp" && settingsAddOpen[view]) editingMcpServerId = "";
+      renderSettingsView();
+    }
+    if (action === "set-skill-add-tab") {
+      settingsSkillAddTab = target.dataset.skillAddTab === "assign" ? "assign" : "create";
+      settingsAddOpen.skills = true;
+      renderSettingsView();
+    }
+    if (action === "toggle-mcp-edit") {
+      const serverId = target.dataset.serverId || "";
+      editingMcpServerId = editingMcpServerId === serverId ? "" : serverId;
+      if (editingMcpServerId) settingsAddOpen.mcp = false;
+      renderSettingsView();
+    }
+    if (action === "save-mcp-server") {
+      saveMcpServer(target).catch(err => setSettingsStatus(String(err), "error"));
+    }
+    if (action === "delete-mcp-server") {
+      deleteMcpServer(target.dataset.serverId || "").catch(err => setSettingsStatus(String(err), "error"));
+    }
+    if (action === "create-skill") {
+      createSkill().catch(err => setSettingsStatus(String(err), "error"));
+    }
+    if (action === "assign-skill") {
+      assignSkill().catch(err => setSettingsStatus(String(err), "error"));
+    }
     if (action === "new-task") {
+      closeSettingsView();
       selectedTaskId = "";
       selectedAgentId = null;
       currentTaskScope = new Set();
@@ -2030,12 +2663,23 @@ export function initializeDashboard() {
       refresh().catch(err => console.error(err));
     }
     if (action === "select-task") {
+      closeSettingsView();
       selectedTaskId = target.dataset.taskId || "";
       selectedAgentId = null;
       currentTaskScope = new Set();
       renderSidebarTasks(lastAllTasks, lastTasks);
       renderDesignedProgress();
       refresh().catch(err => console.error(err));
+    }
+    if (action === "rename-task") {
+      const row = target.closest(".task-item-row");
+      if (row) startInlineRename(row, target.dataset.taskId || "", target.dataset.title || "");
+    }
+    if (action === "delete-task") {
+      const taskId = target.dataset.taskId || "";
+      const current = target.dataset.title || taskId;
+      if (!window.confirm(`Delete task "${current}"? This cannot be undone.`)) return;
+      deleteTask(taskId).catch(err => console.error(err));
     }
     if (action === "report-detail") {
       const reportId = target.dataset.reportId || "";
@@ -2109,6 +2753,17 @@ export function initializeDashboard() {
     if (event.target?.id === "designed-task-config-json") {
       renderDraftOrganizationTree();
     }
+    if (event.target?.closest?.(".settings-form")) {
+      clearFieldError(event.target);
+      setSettingsStatus("editing...");
+    }
+  });
+
+  document.addEventListener("change", (event) => {
+    if (event.target?.closest?.(".settings-form")) {
+      clearFieldError(event.target);
+      setSettingsStatus("editing...");
+    }
   });
 
   sidebarCollapsed = localStorage.getItem("workforceSidebarCollapsed") === "1";
@@ -2116,6 +2771,7 @@ export function initializeDashboard() {
   if (sbInit) sbInit.classList.toggle("collapsed", sidebarCollapsed);
   renderDraftOrganizationTree();
   renderModeControls();
+  renderSettingsNav();
   renderDesignedProgress();
   renderPipelineCard();
   loadRuntimeConfig().catch(err => setRuntimeConfigStatus(String(err)));

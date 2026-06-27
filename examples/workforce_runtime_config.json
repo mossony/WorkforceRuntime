@@ -201,6 +201,14 @@
       "blocked_connection_timeout": 30
     }
   },
+  "skills": {
+    "enabled": true,
+    "materialize_on_worker_start": true,
+    "roots": {
+      "codex": ".agents/skills",
+      "claude_code": ".claude/skills"
+    }
+  },
   "external_mcp": {
     "enabled": true,
     "queue_calls": true,

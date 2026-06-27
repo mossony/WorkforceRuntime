@@ -81,6 +81,14 @@ class ClaudeCodeInteractiveWorker:
         final_message_path = task_dir / "claude-interactive-final.md"
         task_contract_path.write_text(task.model_dump_json(indent=2))
         stderr_path.write_text("")
+        runtime_context.runtime.materialize_agent_skills(
+            agent_id=runtime_context.agent_id,
+            worker_type="claude_code_interactive",
+            workspace=runtime_context.workspace.resolve(),
+            task_id=task.task_id,
+            run_id=run_id,
+            actor_id=runtime_context.agent_id,
+        )
 
         prompt_path = task_dir / "prompt.md"
         prompt = self._build_prompt(task, runtime_context)

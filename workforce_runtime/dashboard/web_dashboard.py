@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import html as html_lib
 import json
 import mimetypes
 import shutil
@@ -29,6 +31,7 @@ from workforce_runtime.dashboard.config import merge_dashboard_config
 from workforce_runtime.dashboard.summaries import total_budget_usage, worker_performance
 from workforce_runtime.dashboard.text_dashboard import render_agent_trajectories
 from workforce_runtime.evals import BenchmarkCase, load_benchmark_case, run_benchmark_case
+from workforce_runtime.mcp.oauth import probe_mcp_auth, start_oauth_login_for_callback
 from workforce_runtime.org_designer import OrgDesigner, OrgDesignRequest
 from workforce_runtime.scheduler.dispatcher import AgentInboxDispatcher
 from workforce_runtime.server.long_rfc_demo import DEFAULT_RFC_URL, run_long_rfc_demo
@@ -383,6 +386,8 @@ def make_web_dashboard_server(
         "agent_id": "claude_worker",
         "result": {},
     }
+    mcp_oauth_lock = threading.Lock()
+    pending_mcp_oauth: dict[str, dict[str, Any]] = {}
 
     def start_long_rfc_demo(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         nonlocal demo_status
@@ -888,6 +893,332 @@ def make_web_dashboard_server(
             )
         return HTTPStatus.OK, {"ok": True, "path": str(path), "config": runtime_config}
 
+    def mcp_settings_payload() -> dict[str, Any]:
+        external = runtime_config.get("external_mcp") if isinstance(runtime_config.get("external_mcp"), dict) else {}
+        return {
+            "ok": True,
+            "path": str(config_source_path),
+            "external_mcp": copy.deepcopy(external),
+            "servers": copy.deepcopy(external.get("servers") if isinstance(external.get("servers"), list) else []),
+        }
+
+    def save_mcp_server_from_dashboard(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        nonlocal runtime_config, dashboard_config
+        server_payload = payload.get("server", payload)
+        if not isinstance(server_payload, dict):
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "server object is required"}
+        server_id = str(server_payload.get("id") or "").strip()
+        url = str(server_payload.get("url") or "").strip()
+        if not server_id:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "server id is required"}
+        if not url:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "server url is required"}
+        auth_payload = server_payload.get("auth") if isinstance(server_payload.get("auth"), dict) else {}
+        auth_type = str(auth_payload.get("type") or server_payload.get("auth_type") or "none").strip() or "none"
+        auth: dict[str, Any] = {"type": auth_type}
+        if auth_type == "bearer":
+            auth["token_env"] = str(auth_payload.get("token_env") or server_payload.get("token_env") or "").strip()
+        elif auth_type == "oauth":
+            auth["metadata"] = copy.deepcopy(auth_payload.get("metadata") if isinstance(auth_payload.get("metadata"), dict) else {})
+        server_entry: dict[str, Any] = {
+            "id": server_id,
+            "enabled": bool(server_payload.get("enabled", True)),
+            "transport": str(server_payload.get("transport") or "http"),
+            "url": url,
+            "tool_prefix": str(server_payload.get("tool_prefix") or server_id).strip() or server_id,
+            "auth": auth,
+            "allowed_agent_ids": _string_list(server_payload.get("allowed_agent_ids"), default=["*"]),
+            "allowed_roles": _string_list(server_payload.get("allowed_roles")),
+            "allowed_departments": _string_list(server_payload.get("allowed_departments")),
+            "allowed_worker_types": _string_list(server_payload.get("allowed_worker_types")),
+            "allowed_tools": _string_list(server_payload.get("allowed_tools"), default=["*"]),
+            "timeout_seconds": _optional_positive_int(server_payload.get("timeout_seconds"), default=30),
+            "queue": {"enabled": bool(server_payload.get("queue_enabled", server_payload.get("queue", {}).get("enabled", True) if isinstance(server_payload.get("queue"), dict) else True))},
+            "tools": copy.deepcopy(server_payload.get("tools") if isinstance(server_payload.get("tools"), list) else []),
+        }
+        next_config = merge_runtime_config(runtime_config)
+        external = copy.deepcopy(next_config.get("external_mcp") if isinstance(next_config.get("external_mcp"), dict) else {})
+        servers = external.get("servers")
+        if not isinstance(servers, list):
+            servers = []
+        replaced = False
+        next_servers: list[dict[str, Any]] = []
+        for item in servers:
+            if isinstance(item, dict) and str(item.get("id") or "") == server_id:
+                next_servers.append(server_entry)
+                replaced = True
+            else:
+                next_servers.append(copy.deepcopy(item))
+        if not replaced:
+            next_servers.append(server_entry)
+        external["servers"] = next_servers
+        next_config["external_mcp"] = external
+        try:
+            path = save_runtime_config(next_config, config_source_path)
+        except Exception as exc:  # noqa: BLE001 - return validation/write errors to the dashboard.
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+        runtime_config = merge_runtime_config(next_config)
+        dashboard_config = dashboard_config_from_runtime(runtime_config)
+        with WorkforceRuntime(db) as runtime:
+            runtime.record_event(
+                event_type="external_mcp_server_saved",
+                actor_id="human",
+                payload={"server_id": server_id, "url": url, "path": str(path)},
+            )
+        return HTTPStatus.OK, {**mcp_settings_payload(), "saved": server_entry}
+
+    def delete_mcp_server_from_dashboard(server_id: str) -> tuple[int, dict[str, Any]]:
+        nonlocal runtime_config, dashboard_config
+        server_id = server_id.strip()
+        if not server_id:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "server id is required"}
+        next_config = merge_runtime_config(runtime_config)
+        external = copy.deepcopy(next_config.get("external_mcp") if isinstance(next_config.get("external_mcp"), dict) else {})
+        servers = external.get("servers")
+        if not isinstance(servers, list):
+            servers = []
+        next_servers: list[dict[str, Any]] = []
+        removed: dict[str, Any] | None = None
+        for item in servers:
+            if isinstance(item, dict) and str(item.get("id") or "") == server_id:
+                removed = copy.deepcopy(item)
+                continue
+            next_servers.append(copy.deepcopy(item) if isinstance(item, dict) else item)
+        if removed is None:
+            return HTTPStatus.NOT_FOUND, {"ok": False, "error": f"MCP server not found: {server_id}"}
+        external["servers"] = next_servers
+        next_config["external_mcp"] = external
+        try:
+            path = save_runtime_config(next_config, config_source_path)
+        except Exception as exc:  # noqa: BLE001 - return validation/write errors to the dashboard.
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+        runtime_config = merge_runtime_config(next_config)
+        dashboard_config = dashboard_config_from_runtime(runtime_config)
+        with WorkforceRuntime(db) as runtime:
+            runtime.record_event(
+                event_type="external_mcp_server_deleted",
+                actor_id="human",
+                payload={"server_id": server_id, "url": str(removed.get("url") or ""), "path": str(path)},
+            )
+        return HTTPStatus.OK, {**mcp_settings_payload(), "deleted": server_id}
+
+    def start_mcp_oauth_from_dashboard(payload: dict[str, Any], dashboard_callback_url: str) -> tuple[int, dict[str, Any]]:
+        server_payload = payload.get("server", payload)
+        if not isinstance(server_payload, dict):
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "server object is required"}
+        server_id = str(server_payload.get("id") or server_payload.get("server_id") or "").strip()
+        url = str(server_payload.get("url") or "").strip()
+        if not server_id:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "server id is required"}
+        if not url:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "server url is required"}
+        external = runtime_config.get("external_mcp") if isinstance(runtime_config.get("external_mcp"), dict) else {}
+        oauth_defaults = external.get("oauth") if isinstance(external.get("oauth"), dict) else {}
+        timeout = _optional_positive_int(
+            server_payload.get("timeout_seconds") or oauth_defaults.get("timeout_seconds"),
+            default=300,
+        )
+        callback_url = str(server_payload.get("callback_url") or oauth_defaults.get("callback_url") or dashboard_callback_url)
+        scopes = _string_list(server_payload.get("scope") or server_payload.get("scopes"))
+        client_id = str(server_payload.get("client_id") or "").strip()
+        client_secret = str(server_payload.get("client_secret") or "").strip()
+        resource = str(server_payload.get("resource") or "").strip()
+        try:
+            probe = probe_mcp_auth(url, timeout_seconds=min(float(timeout), 10.0))
+            handle = start_oauth_login_for_callback(
+                server_id=server_id,
+                url=url,
+                callback_url=callback_url,
+                metadata=probe.oauth_metadata if probe.auth_status == "oauth" else None,
+                scopes=scopes,
+                client_id=client_id,
+                client_secret=client_secret,
+                resource=resource,
+                timeout_seconds=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface OAuth discovery/start errors to dashboard.
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+        with mcp_oauth_lock:
+            _prune_pending_mcp_oauth(pending_mcp_oauth)
+            pending_mcp_oauth[handle.state] = {
+                "server_id": server_id,
+                "url": url,
+                "authorization_url": handle.authorization_url,
+                "created_at": time.time(),
+                "handle": handle,
+            }
+        with WorkforceRuntime(db) as runtime:
+            runtime.record_event(
+                event_type="external_mcp_oauth_started",
+                actor_id="human",
+                payload={"server_id": server_id, "url": url, "redirect_uri": handle.redirect_uri},
+            )
+        return HTTPStatus.ACCEPTED, {
+            "ok": True,
+            "server_id": server_id,
+            "url": url,
+            "authorization_url": handle.authorization_url,
+            "redirect_uri": handle.redirect_uri,
+            "message": "Open the authorization URL and complete the OAuth callback.",
+        }
+
+    def complete_mcp_oauth_from_dashboard(path: str, query: str) -> tuple[int, str]:
+        callback_id = path.removeprefix("/api/settings/mcp/oauth/callback/").strip("/")
+        params = parse_qs(query)
+        code = _first_query_param(params, "code")
+        state = _first_query_param(params, "state")
+        error = _first_query_param(params, "error")
+        error_description = _first_query_param(params, "error_description")
+        if not state:
+            return HTTPStatus.BAD_REQUEST, _oauth_callback_html("OAuth login failed", "The callback was missing state.", False)
+        with mcp_oauth_lock:
+            pending = pending_mcp_oauth.pop(state, None)
+        if not isinstance(pending, dict):
+            return HTTPStatus.BAD_REQUEST, _oauth_callback_html(
+                "OAuth login expired",
+                "Workforce Runtime could not find this OAuth login. Start OAuth again from the dashboard.",
+                False,
+            )
+        server_id = str(pending.get("server_id") or "")
+        url = str(pending.get("url") or "")
+        authorization_url = str(pending.get("authorization_url") or "")
+        handle = pending.get("handle")
+        try:
+            if error:
+                raise RuntimeError(error_description or error)
+            if callback_id != getattr(handle, "callback_id", ""):
+                raise RuntimeError("OAuth callback path did not match the pending login")
+            result = handle.complete(code=code, state=state)
+            with WorkforceRuntime(db) as runtime:
+                runtime.record_event(
+                    event_type="external_mcp_oauth_finished",
+                    actor_id="human",
+                    payload={
+                        "server_id": result.server_id,
+                        "url": result.url,
+                        "token_path": str(result.token_path),
+                        "scopes": list(result.scopes),
+                        "expires_at": result.expires_at,
+                    },
+                )
+            return HTTPStatus.OK, _oauth_callback_html(
+                "Authentication complete",
+                "Workforce Runtime saved the MCP OAuth token. You can close this tab.",
+                True,
+            )
+        except Exception as exc:  # noqa: BLE001 - record callback/token exchange failures.
+            with WorkforceRuntime(db) as runtime:
+                runtime.record_event(
+                    event_type="external_mcp_oauth_failed",
+                    actor_id="human",
+                    payload={
+                        "server_id": server_id,
+                        "url": url,
+                        "authorization_url": authorization_url,
+                        "error": str(exc),
+                    },
+                )
+            return HTTPStatus.BAD_REQUEST, _oauth_callback_html("OAuth login failed", str(exc), False)
+
+    def wait_mcp_oauth_background(server_id: str, url: str, authorization_url: str, handle: Any) -> None:
+        try:
+            result = handle.wait()
+            with WorkforceRuntime(db) as runtime:
+                runtime.record_event(
+                    event_type="external_mcp_oauth_finished",
+                    actor_id="human",
+                    payload={
+                        "server_id": result.server_id,
+                        "url": result.url,
+                        "token_path": str(result.token_path),
+                        "scopes": list(result.scopes),
+                        "expires_at": result.expires_at,
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001 - record async auth failures.
+            with WorkforceRuntime(db) as runtime:
+                runtime.record_event(
+                    event_type="external_mcp_oauth_failed",
+                    actor_id="human",
+                    payload={
+                        "server_id": server_id,
+                        "url": url,
+                        "authorization_url": authorization_url,
+                        "error": str(exc),
+                    },
+                )
+
+    def skill_settings_payload() -> dict[str, Any]:
+        with WorkforceRuntime(db) as runtime:
+            skills = runtime.list_skills()
+            assignments = runtime.list_skill_assignments()
+            agents_payload = [
+                {
+                    "id": agent.id,
+                    "name": agent.name,
+                    "role": agent.role,
+                    "department": agent.department,
+                    "worker_type": agent.worker_type,
+                }
+                for agent in runtime.store.list_agents()
+            ]
+            materializations = runtime.list_skill_materializations()
+        return {
+            "ok": True,
+            "config": copy.deepcopy(runtime_config.get("skills") if isinstance(runtime_config.get("skills"), dict) else {}),
+            "skills": [skill.model_dump(mode="json") for skill in skills],
+            "assignments": [assignment.model_dump(mode="json") for assignment in assignments],
+            "agents": agents_payload,
+            "materializations": [item.model_dump(mode="json") for item in materializations],
+        }
+
+    def create_skill_from_dashboard(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        name = str(payload.get("name") or "").strip()
+        description = str(payload.get("description") or "").strip()
+        instructions = str(payload.get("instructions") or "").strip()
+        if not name:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "skill name is required"}
+        if not description:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "skill description is required"}
+        provider_targets = _string_list(payload.get("provider_targets"), default=["codex", "claude_code"])
+        status = str(payload.get("status") or "approved").strip() or "approved"
+        try:
+            with WorkforceRuntime(db) as runtime:
+                skill = runtime.create_skill(
+                    name=name,
+                    description=description,
+                    instructions=instructions,
+                    status=status,
+                    provider_targets=provider_targets,
+                    source=str(payload.get("source") or "dashboard"),
+                    actor_id=str(payload.get("actor_id") or "human"),
+                )
+        except Exception as exc:  # noqa: BLE001 - return model/store validation errors.
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+        return HTTPStatus.OK, {**skill_settings_payload(), "created": skill.model_dump(mode="json")}
+
+    def assign_skill_from_dashboard(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        skill_id = str(payload.get("skill_id") or "").strip()
+        target_type = str(payload.get("target_type") or "").strip()
+        target_id = str(payload.get("target_id") or "*").strip() or "*"
+        if not skill_id:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "skill_id is required"}
+        if target_type not in {"global", "agent", "role", "department", "worker_type"}:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "target_type is invalid"}
+        try:
+            with WorkforceRuntime(db) as runtime:
+                assignment = runtime.assign_skill(
+                    skill_id=skill_id,
+                    target_type=target_type,  # type: ignore[arg-type]
+                    target_id=target_id,
+                    actor_id=str(payload.get("actor_id") or "human"),
+                    enabled=bool(payload.get("enabled", True)),
+                    materialize_on_start=bool(payload.get("materialize_on_start", True)),
+                )
+        except Exception as exc:  # noqa: BLE001 - return model/store validation errors.
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+        return HTTPStatus.OK, {**skill_settings_payload(), "created_assignment": assignment.model_dump(mode="json")}
+
     def export_task_trace_from_dashboard(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         task_id = str(payload.get("task_id") or "").strip()
         if not task_id:
@@ -920,6 +1251,46 @@ def make_web_dashboard_server(
             "path": trace.path,
             "url": f"/api/file?path={quote(trace.path)}",
         }
+
+    def rename_task_from_dashboard(task_id: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        task_id = (task_id or "").strip()
+        if not task_id:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "task_id is required"}
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "title is required"}
+        with WorkforceRuntime(db) as runtime:
+            task = runtime.store.get_task(task_id)
+            if task is None:
+                return HTTPStatus.NOT_FOUND, {"ok": False, "error": f"task not found: {task_id}"}
+            previous_title = task.title
+            if title == previous_title:
+                return HTTPStatus.OK, {"ok": True, "task_id": task_id, "title": title}
+            updated = task.model_copy(update={"title": title})
+            runtime.store.save_task(updated)
+            runtime.record_event(
+                event_type="task_renamed",
+                actor_id="human",
+                payload={"task_id": task_id, "title": title, "previous_title": previous_title},
+            )
+        return HTTPStatus.OK, {"ok": True, "task_id": task_id, "title": title}
+
+    def delete_task_from_dashboard(task_id: str) -> tuple[int, dict[str, Any]]:
+        task_id = (task_id or "").strip()
+        if not task_id:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "task_id is required"}
+        with WorkforceRuntime(db) as runtime:
+            task = runtime.store.get_task(task_id)
+            if task is None:
+                return HTTPStatus.NOT_FOUND, {"ok": False, "error": f"task not found: {task_id}"}
+            title = task.title
+            runtime.store.delete_task(task_id)
+            runtime.record_event(
+                event_type="task_deleted",
+                actor_id="human",
+                payload={"task_id": task_id, "title": title},
+            )
+        return HTTPStatus.OK, {"ok": True, "deleted": task_id}
 
     def steer_agent_from_dashboard(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         agent_id = str(payload.get("agent_id") or "").strip()
@@ -1209,6 +1580,16 @@ def make_web_dashboard_server(
             if parsed.path == "/api/runtime-config":
                 self._send_json({"ok": True, "path": str(config_source_path), "config": runtime_config})
                 return
+            if parsed.path == "/api/settings/mcp":
+                self._send_json(mcp_settings_payload())
+                return
+            if parsed.path.startswith("/api/settings/mcp/oauth/callback/"):
+                status, html = complete_mcp_oauth_from_dashboard(parsed.path, parsed.query)
+                self._send_html(html, status=status)
+                return
+            if parsed.path == "/api/settings/skills":
+                self._send_json(skill_settings_payload())
+                return
             if parsed.path == "/api/demos/long-rfc/status":
                 with demo_lock:
                     self._send_json(dict(demo_status))
@@ -1301,12 +1682,47 @@ def make_web_dashboard_server(
                 status, payload = update_runtime_config(self._read_json_body())
                 self._send_json(payload, status=status)
                 return
+            if parsed.path == "/api/settings/mcp/servers":
+                status, payload = save_mcp_server_from_dashboard(self._read_json_body())
+                self._send_json(payload, status=status)
+                return
+            if parsed.path == "/api/settings/mcp/oauth/start":
+                status, payload = start_mcp_oauth_from_dashboard(self._read_json_body(), self._oauth_callback_base_url())
+                self._send_json(payload, status=status)
+                return
+            if parsed.path == "/api/settings/skills":
+                status, payload = create_skill_from_dashboard(self._read_json_body())
+                self._send_json(payload, status=status)
+                return
+            if parsed.path == "/api/settings/skills/assignments":
+                status, payload = assign_skill_from_dashboard(self._read_json_body())
+                self._send_json(payload, status=status)
+                return
             if parsed.path == "/api/tasks/export-trace":
                 status, payload = export_task_trace_from_dashboard(self._read_json_body())
                 self._send_json(payload, status=status)
                 return
             if parsed.path == "/api/agents/steer":
                 status, payload = steer_agent_from_dashboard(self._read_json_body())
+                self._send_json(payload, status=status)
+                return
+            if parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/rename"):
+                task_id = unquote(parsed.path.removeprefix("/api/tasks/").removesuffix("/rename"))
+                status, payload = rename_task_from_dashboard(task_id, self._read_json_body())
+                self._send_json(payload, status=status)
+                return
+            self.send_error(HTTPStatus.NOT_FOUND, "not found")
+
+        def do_DELETE(self) -> None:  # noqa: N802
+            parsed = urlparse(self.path)
+            if parsed.path.startswith("/api/settings/mcp/servers/"):
+                server_id = unquote(parsed.path.removeprefix("/api/settings/mcp/servers/"))
+                status, payload = delete_mcp_server_from_dashboard(server_id)
+                self._send_json(payload, status=status)
+                return
+            if parsed.path.startswith("/api/tasks/"):
+                task_id = unquote(parsed.path.removeprefix("/api/tasks/"))
+                status, payload = delete_task_from_dashboard(task_id)
                 self._send_json(payload, status=status)
                 return
             self.send_error(HTTPStatus.NOT_FOUND, "not found")
@@ -1364,9 +1780,18 @@ def make_web_dashboard_server(
             self.wfile.write(body)
             self.wfile.flush()
 
-        def _send_html(self, html: str) -> None:
+        def _oauth_callback_base_url(self) -> str:
+            protocol = str(self.headers.get("X-Forwarded-Proto") or "http").split(",", 1)[0].strip() or "http"
+            host_header = str(self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "").split(",", 1)[0].strip()
+            if not host_header:
+                bound_host, bound_port = self.server.server_address[:2]
+                display_host = "127.0.0.1" if bound_host in {"", "0.0.0.0", "::"} else str(bound_host)
+                host_header = f"{display_host}:{bound_port}"
+            return f"{protocol}://{host_header}/api/settings/mcp/oauth/callback"
+
+        def _send_html(self, html: str, *, status: int = HTTPStatus.OK) -> None:
             body = html.encode()
-            self.send_response(HTTPStatus.OK)
+            self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
@@ -2070,6 +2495,76 @@ def _sequenced_event_summary(item: SequencedEvent) -> dict[str, Any]:
     return {"sequence": item.sequence, "event": _event_summary(item.event)}
 
 
+def _prune_pending_mcp_oauth(pending: dict[str, dict[str, Any]], *, max_age_seconds: int = 900) -> None:
+    cutoff = time.time() - max_age_seconds
+    for state, item in list(pending.items()):
+        created_at = item.get("created_at")
+        if not isinstance(created_at, float | int) or created_at < cutoff:
+            pending.pop(state, None)
+
+
+def _first_query_param(params: dict[str, list[str]], key: str) -> str:
+    values = params.get(key) or []
+    return values[0] if values else ""
+
+
+def _oauth_callback_html(title: str, message: str, ok: bool) -> str:
+    color = "#2f7a4d" if ok else "#a33a32"
+    escaped_title = html_lib.escape(title)
+    escaped_message = html_lib.escape(message)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escaped_title}</title>
+  <style>
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+      background: #f4f3f0;
+      color: #1c1b19;
+    }}
+    main {{
+      width: min(480px, calc(100vw - 40px));
+      border: 1px solid #e3e0da;
+      border-radius: 14px;
+      background: #fff;
+      padding: 28px;
+      box-shadow: 0 1px 2px rgba(28, 27, 25, .06);
+    }}
+    .dot {{
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      background: {color};
+      margin-bottom: 18px;
+    }}
+    h1 {{
+      margin: 0 0 10px 0;
+      font-size: 22px;
+      letter-spacing: -.02em;
+    }}
+    p {{
+      margin: 0;
+      color: #6f6a61;
+      line-height: 1.55;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="dot"></div>
+    <h1>{escaped_title}</h1>
+    <p>{escaped_message}</p>
+  </main>
+</body>
+</html>"""
+
+
 def _compact_event_replay(events: list[Any]) -> str:
     lines = [
         "Event Replay",
@@ -2163,6 +2658,36 @@ def _payload_int(payload: dict[str, Any], key: str, default: int) -> int:
         return int(payload.get(key, default))
     except (TypeError, ValueError):
         return default
+
+
+def _optional_positive_int(value: object, *, default: int) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _string_list(value: object, *, default: list[str] | None = None) -> list[str]:
+    if value is None:
+        return list(default or [])
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",")]
+    elif isinstance(value, list):
+        items = [str(item).strip() for item in value]
+    else:
+        items = [str(value).strip()]
+    cleaned = [item for item in items if item]
+    return cleaned or list(default or [])
 
 
 # Dashboard UI is built from workforce_runtime/dashboard/frontend into dashboard/static.
