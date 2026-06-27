@@ -35,8 +35,8 @@ def test_sample_repo_fix_demo_runs_no_tools_and_tool_tasks(tmp_path: Path) -> No
     assert "Tool task: task_005" in output
     assert "Worker Report:" in output
     assert "Fixed boolean parser handling and ran pytest." in output
-    assert "Manager Review:" in output
-    assert "'decision': 'accept'" in output
+    assert "Manager Review Inbox:" in output
+    assert "'report_id':" in output
     assert "Diff:" in output
     assert "Test log:" in output
     assert "Final status: completed" in output
@@ -152,7 +152,8 @@ def test_large_scale_org_builder_creates_requested_headcount() -> None:
     assert len(organization.agents) == 120
     assert organization.require_agent("ceo").manager_id is None
     assert any(agent.manager_id == "ceo" for agent in organization.agents)
-    workers = [agent for agent in organization.agents if agent.worker_type == "openrouter_worker"]
+    manager_ids = {agent.manager_id for agent in organization.agents if agent.manager_id}
+    workers = [agent for agent in organization.agents if agent.id not in manager_ids and agent.manager_id is not None]
     assert workers
     assert all(worker.manager_id for worker in workers)
 
@@ -224,8 +225,10 @@ def test_large_task_100_policy_instantiation_uses_intermediate_managers() -> Non
     assert organization.require_agent("budget_and_forecast_analyst").manager_id == "chief_financial_officer"
     assert len(direct_reports["chief_software_architect"]) <= 8
     assert max(len(reports) for reports in direct_reports.values()) <= 8
+    assert {agent.worker_type for agent in organization.agents} == {"codex"}
+    manager_ids = {agent.manager_id for agent in organization.agents if agent.manager_id}
     for agent in organization.agents:
-        if agent.worker_type == "openrouter_worker":
+        if agent.id not in manager_ids:
             assert agent.model != "openai/gpt-oss-120b:free"
 
 

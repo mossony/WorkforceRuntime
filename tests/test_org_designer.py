@@ -77,8 +77,10 @@ def test_org_designer_fallback_creates_budgeted_management_chain() -> None:
     agents = {agent.id: agent for agent in organization.agents}
     assert organization.company.mission.startswith("Research a public RFC")
     assert agents["ceo"].model == "openai/gpt-oss-120b:free"
+    assert agents["ceo"].worker_type == "codex"
     assert "report_to_human" in agents["ceo"].permissions
     assert agents["primary_worker"].model == "poolside/laguna-xs.2:free"
+    assert agents["primary_worker"].worker_type == "codex"
     assert "submit_artifact" in agents["primary_worker"].permissions
     assert agents["primary_worker"].system_prompt
 
@@ -96,6 +98,7 @@ def test_org_designer_fallback_expands_to_requested_headcount() -> None:
     assert organization.company.headcount_limit == 20
     assert len(organization.agents) == 20
     assert organization.agents[-1].model == "poolside/laguna-m.1:free"
+    assert organization.agents[-1].worker_type == "codex"
     assert organization.agents[-1].manager_id
     assert organization.agents[-1].system_prompt
 
@@ -109,5 +112,7 @@ def test_org_designer_can_use_llm_json_response() -> None:
     assert organization.company.name == "LLM Designed Workforce"
     assert [agent.id for agent in organization.agents] == ["ceo", "research_manager", "primary_worker", "worker_01"]
     assert "report_to_human" in organization.require_agent("ceo").permissions
+    assert organization.require_agent("ceo").worker_type == "codex"
+    assert organization.require_agent("primary_worker").worker_type == "codex"
     assert organization.require_agent("primary_worker").manager_id == "research_manager"
     assert organization.require_agent("worker_01").manager_id == "research_manager"

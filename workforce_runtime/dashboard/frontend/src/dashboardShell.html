@@ -1,0 +1,255 @@
+<div id="app-shell">
+
+  <!-- SIDEBAR -->
+  <aside id="sidebar">
+    <div class="sb-header">
+      <div class="sb-mode-wrap" id="sb-mode-wrap">
+        <div class="sb-mode-slider" id="sb-mode-slider"></div>
+        <button id="mode-simple" data-action="set-dashboard-mode" data-mode="simple" style="color:#1c1b19;">
+          <span style="width:5px;height:5px;border-radius:50%;background:#4a8b63;display:inline-block;"></span>Simple
+        </button>
+        <button id="mode-debug" data-action="set-dashboard-mode" data-mode="debug" style="color:#8a867f;">Debug</button>
+      </div>
+      <button class="sb-collapse-btn" data-action="toggle-sidebar" title="Collapse">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M6 3.5 2.5 8 6 12.5M13.5 8H3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+    <button class="sb-new-task" data-action="new-task">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      <span class="sb-new-task-text">New task</span>
+    </button>
+    <div class="sb-search-wrap">
+      <div class="sb-search">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="flex:0 0 auto;color:#8a867f;"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        <input id="sidebar-search-input" placeholder="Search tasks" oninput="onSidebarSearch(this.value)">
+        <span class="sb-search-count" id="sidebar-task-count">0</span>
+      </div>
+    </div>
+    <div class="sb-section-title">Task history</div>
+    <div class="wr-scroll" id="sidebar-tasks"></div>
+    <div class="sb-footer">
+      <div class="sb-avatar" id="company-initials">WR</div>
+      <div style="min-width:0;">
+        <div class="sb-name" id="mission">Workforce Runtime</div>
+        <div class="sb-sub" id="sidebar-sub">0 agents</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main id="main">
+    <!-- STATUS BAR -->
+    <div id="status-bar">
+      <div class="sbar-inner">
+        <div class="sbar-company">
+          <span class="sbar-pulse-wrap"><span class="sbar-pulse"></span></span>
+          <div>
+            <div class="sbar-company-name" id="company-name-status">Workforce Runtime</div>
+            <div class="sbar-company-sub">Operating</div>
+          </div>
+        </div>
+        <div id="status-metrics"></div>
+      </div>
+    </div>
+
+    <!-- SCROLL -->
+    <div class="wr-scroll" id="main-scroll">
+      <div id="main-content">
+
+        <!-- TITLE -->
+        <div style="padding:48px 0 22px 0;">
+          <div class="home-eyebrow">New directive</div>
+          <h1 class="home-h1">Where should we begin?</h1>
+          <p class="home-desc">Brief your workforce. The organization will design its structure, staff the right agents, execute, and report back with decisions for you.</p>
+        </div>
+
+        <!-- INPUT CARD -->
+        <div class="input-card idle" id="input-card">
+          <div class="input-top">
+            <button class="input-attach" data-action="toggle-composer-config" title="Configure task">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3.2v9.6M3.2 8h9.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+            <textarea id="designed-task-goal" rows="2" placeholder="Describe the goal for your workforce..." oninput="onGoalInput(this)" onfocus="onGoalFocus()" onblur="onGoalBlur()"></textarea>
+          </div>
+          <div class="input-examples new-task-only">
+            <button class="example-chip" onclick="applyExample('Launch the public beta and operate it for 30 days. Prioritize tenant isolation, cost control, and reliability.')">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M8 1.6 9.9 6l4.5.3-3.5 2.9 1.2 4.4L8 11.2 3.9 13.6l1.2-4.4L1.6 6.3 6.1 6z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+              Launch the public beta
+            </button>
+            <button class="example-chip" onclick="applyExample('Rebuild and reconcile the Q3 revenue model against actuals, then prepare it for board reporting.')">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M8 1.6 9.9 6l4.5.3-3.5 2.9 1.2 4.4L8 11.2 3.9 13.6l1.2-4.4L1.6 6.3 6.1 6z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+              Rebuild the Q3 revenue model
+            </button>
+          </div>
+          <div class="input-footer">
+            <div class="input-footer-left">
+              <span class="input-type-badge new-task-only">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="2.5" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.3"/></svg>
+                New task
+              </span>
+              <span id="input-char-count"></span>
+            </div>
+            <button id="design-task-config" data-action="design-task-config">
+              <svg id="submit-icon-arrow" width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.5 8h11M9 3.5 13.5 8 9 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <svg id="submit-icon-spin" width="14" height="14" viewBox="0 0 16 16" fill="none" style="display:none;animation:wrSpin .8s linear infinite;"><path d="M8 1.8a6.2 6.2 0 1 1-6.2 6.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+              <span id="submit-label">Design Org</span>
+            </button>
+            <button id="run-designed-task" data-action="start-designed-task" hidden>Run</button>
+          </div>
+          <div id="composer-config-panel" class="composer-config-panel" hidden>
+            <div class="composer-config-grid">
+              <label>Headcount<input id="designed-task-headcount" type="number" min="3" value="6"></label>
+              <label>Token budget<input id="designed-task-token-budget" type="number" min="0" value="600000"></label>
+              <label>Manager model<input id="designed-task-management-model" value="openai/gpt-oss-120b:free"></label>
+              <label>Worker model<input id="designed-task-worker-model" value="poolside/laguna-m.1:free"></label>
+            </div>
+            <div class="composer-config-actions">
+              <div class="muted">These values apply to the next organization design. Full JSON remains available in Debug mode.</div>
+              <button data-action="toggle-debug-config">Open full config</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- PIPELINE -->
+        <div id="pipeline-card"></div>
+
+        <!-- SIMPLE ORG CHART -->
+        <section id="simple-org-section" class="simple-only">
+          <div class="simple-org-header">
+            <div class="simple-org-title">
+              <h2>Task organization</h2>
+              <div class="simple-org-sub" id="simple-org-subtitle">Select a task to inspect its workforce.</div>
+            </div>
+            <div class="simple-org-actions">
+              <button data-action="simple-org-fit">Fit</button>
+              <button data-action="simple-org-zoom-out">-</button>
+              <button data-action="simple-org-zoom-in">+</button>
+            </div>
+          </div>
+          <div class="simple-org-frame" id="simple-org-frame">
+            <div id="simple-org-stage">
+              <div id="simple-org-canvas"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- HUMAN REPORTS -->
+        <div id="home-reports-section">
+          <div class="reports-hdr">
+            <div class="reports-hdr-left">
+              <span class="reports-label">Human Reports</span>
+              <span id="reports-count">0</span>
+            </div>
+            <span class="reports-from" id="reports-from"></span>
+          </div>
+          <div id="home-human-reports"></div>
+        </div>
+
+        <!-- DEBUG PANELS -->
+        <div id="debug-section">
+          <div class="panel">
+            <div class="org-toolbar"><h2>Org Chart</h2><div class="muted" id="org-summary"></div></div>
+            <div class="communication-pulses" id="communication-pulses"></div>
+            <div id="org-chart"></div>
+          </div>
+          <div class="panel">
+            <h2>Internal Manager Reports</h2>
+            <div class="manager-reports" id="manager-reports"></div>
+          </div>
+          <div class="panel"><h2>Agents</h2><table id="agents"></table></div>
+          <div class="panel"><h2>Tasks</h2><table id="tasks"></table></div>
+          <div class="panel"><h2>Agent Runs</h2><table id="runs"></table></div>
+          <div class="panel"><h2>Reports</h2><table id="reports"></table></div>
+          <div class="panel"><h2>Live Agent Output</h2><div id="output"></div></div>
+          <div class="panel"><h2>Replay</h2><pre id="replay"></pre></div>
+          <div class="panel"><h2>Trajectories</h2><pre id="trajectories"></pre></div>
+          <div class="panel">
+            <div class="task-designer">
+              <div class="demo-panel">
+                <div class="demo-copy"><div class="demo-title">Runtime Config</div><div class="muted">Unified Workforce Runtime JSON config.</div></div>
+                <div class="demo-actions">
+                  <button id="load-runtime-config" data-action="load-runtime-config" class="primary-button">Load Config</button>
+                  <button id="save-runtime-config" data-action="save-runtime-config" class="primary-button">Save Config</button>
+                  <span class="pill" id="runtime-config-status">config idle</span>
+                </div>
+              </div>
+              <textarea class="config-editor" id="runtime-config-json" spellcheck="false"></textarea>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="demo-panel">
+              <div class="demo-copy"><div class="demo-title">Long RFC Demo</div></div>
+              <div class="demo-actions">
+                <button class="primary-button" id="start-long-rfc-demo" data-action="start-long-rfc-demo">Start Long RFC Demo</button>
+                <span class="pill" id="long-rfc-demo-status">idle</span>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="demo-panel">
+              <div class="demo-copy"><div class="demo-title">Real LLM Benchmark</div></div>
+              <div class="demo-actions">
+                <button class="primary-button" id="start-real-llm-benchmark" data-action="start-real-llm-benchmark">Start Real LLM Benchmark</button>
+                <span class="pill" id="real-llm-benchmark-status">idle</span>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="demo-panel">
+              <div class="demo-copy"><div class="demo-title">Claude Steer Demo</div></div>
+              <div class="demo-actions">
+                <button class="primary-button" id="start-claude-steer-demo" data-action="start-claude-steer-demo">Start Claude Steer Demo</button>
+                <span class="pill" id="claude-steer-demo-status">idle</span>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="task-designer">
+              <div class="demo-panel">
+                <div class="demo-copy"><div class="demo-title">Draft Config / Start Confirmed Task</div></div>
+                <div class="demo-actions">
+                  <button class="primary-button" id="start-designed-task" data-action="start-designed-task">Start Confirmed Task</button>
+                  <span class="pill" id="designed-task-status">idle</span>
+                  <label style="display:inline-flex;grid-auto-flow:column;align-items:center;gap:6px;width:auto;">
+                    Filter task
+                    <select id="task-filter-select" style="min-width:260px;"><option value="">All tasks</option></select>
+                  </label>
+                  <button id="export-task-trace" data-action="export-task-trace">Export Trace</button>
+                  <span class="pill" id="task-trace-export-status">trace idle</span>
+                </div>
+              </div>
+              <div class="muted">Use the composer configuration panel for headcount, budget, and model defaults.</div>
+              <div id="designed-task-progress" class="operation-progress" aria-live="polite">
+                <div class="operation-progress-head">
+                  <div>
+                    <div class="operation-progress-title" id="designed-task-progress-title">No design request running.</div>
+                    <div class="operation-progress-detail" id="designed-task-progress-detail">Click Design Org to generate a draft organization.</div>
+                  </div>
+                  <span class="pill" id="designed-task-progress-elapsed">idle</span>
+                </div>
+                <div class="progress-track"><div class="progress-fill"></div></div>
+                <div class="progress-steps" id="designed-task-progress-steps"></div>
+              </div>
+              <div class="draft-org-panel">
+                <div class="draft-org-head"><div class="draft-org-title">Draft Organization Tree</div><span class="pill" id="draft-org-summary">no draft</span></div>
+                <div id="draft-org-tree" class="muted">No draft yet.</div>
+              </div>
+              <label>Editable config JSON<textarea class="config-editor" id="designed-task-config-json" spellcheck="false"></textarea></label>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:none;">
+          <span id="stream-status">connecting</span>
+          <span id="updated"></span>
+          <div id="metrics"></div>
+          <div id="human-reports"></div>
+        </div>
+
+      </div><!-- #main-content -->
+    </div><!-- #main-scroll -->
+  </main>
+</div><!-- #app-shell -->
+
+  <div class="detail-backdrop" id="agent-backdrop" hidden data-action="close-detail"></div>
+  <aside class="detail-drawer" id="agent-detail" aria-hidden="true"></aside>

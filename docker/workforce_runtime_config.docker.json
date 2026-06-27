@@ -1,0 +1,356 @@
+{
+  "runtime": {
+    "store_backend": "mysql",
+    "db_path": "workforce_runtime",
+    "workspace_root": "/app/.workforce_runtime",
+    "task_trace_dir": "",
+    "task_trace_include_file_contents": true,
+    "task_trace_max_file_bytes": 500000
+  },
+  "mysql": {
+    "host": "workforce-mysql",
+    "port": 3306,
+    "username": "workforce",
+    "password": "workforce",
+    "database": "workforce_runtime",
+    "charset": "utf8mb4",
+    "connect_timeout": 10
+  },
+  "openrouter": {
+    "chat_completions_url": "https://openrouter.ai/api/v1/chat/completions",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "timeout_seconds": 90,
+    "reasoning_enabled": true,
+    "stream": false,
+    "http_referer": "https://github.com/openai/workforce-runtime",
+    "x_title": "Workforce Runtime"
+  },
+  "nvidia": {
+    "chat_completions_url": "https://integrate.api.nvidia.com/v1/chat/completions",
+    "api_key_env": "NVIDIA_API_KEY",
+    "timeout_seconds": 120,
+    "reasoning_enabled": false,
+    "stream": false,
+    "response_format_enabled": false
+  },
+  "models": {
+    "openai/gpt-oss-120b:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 131072,
+      "max_output_tokens": 131072,
+      "supports_reasoning": true,
+      "requires_reasoning": true,
+      "supports_tools": true,
+      "supports_response_format": true,
+      "source": "https://openrouter.ai/openai/gpt-oss-120b:free"
+    },
+    "poolside/laguna-m.1:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 262144,
+      "max_output_tokens": 32768,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "supports_response_format": true,
+      "source": "https://openrouter.ai/poolside/laguna-m.1:free"
+    },
+    "poolside/laguna-xs.2:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 262144,
+      "max_output_tokens": 32768,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "supports_response_format": true,
+      "source": "https://openrouter.ai/poolside/laguna-xs.2:free"
+    },
+    "openrouter/owl-alpha": {
+      "provider": "openrouter",
+      "context_window_tokens": 1048756,
+      "max_output_tokens": null,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "supports_response_format": false,
+      "source": "https://openrouter.ai/openrouter/owl-alpha"
+    },
+    "nvidia/nemotron-3-ultra-550b-a55b:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 1000000,
+      "max_output_tokens": null,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "supports_response_format": false,
+      "source": "https://openrouter.ai/nvidia/nemotron-3-ultra-550b-a55b:free"
+    },
+    "nvidia/nemotron-3-super-120b-a12b:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 1000000,
+      "max_output_tokens": null,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "supports_response_format": false,
+      "source": "https://openrouter.ai/nvidia/nemotron-3-super-120b-a12b:free"
+    },
+    "cohere/north-mini-code:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 256000,
+      "max_output_tokens": 64000,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "supports_response_format": true,
+      "source": "https://openrouter.ai/cohere/north-mini-code:free"
+    },
+    "openai/gpt-oss-20b:free": {
+      "provider": "openrouter",
+      "context_window_tokens": 131072,
+      "max_output_tokens": null,
+      "supports_reasoning": true,
+      "requires_reasoning": true,
+      "supports_tools": true,
+      "supports_response_format": true,
+      "source": "https://openrouter.ai/openai/gpt-oss-20b:free"
+    }
+  },
+  "org_designer": {
+    "company_name": "Designed Workforce",
+    "headcount_limit": 6,
+    "token_budget": 600000,
+    "management_model": "openai/gpt-oss-120b:free",
+    "worker_model": "poolside/laguna-xs.2:free",
+    "include_hr": true,
+    "max_management_depth": 3,
+    "use_llm": true
+  },
+  "designed_task": {
+    "company_name": "Designed Task Workforce",
+    "headcount_limit": 6,
+    "token_budget": 600000,
+    "management_model": "openai/gpt-oss-120b:free",
+    "worker_model": "poolside/laguna-m.1:free",
+    "judge_model": "openai/gpt-oss-120b:free",
+    "use_llm": true,
+    "judge": "heuristic",
+    "reset": false,
+    "constraints": [
+      "Preserve the user's stated objective."
+    ],
+    "acceptance_criteria": [
+      "Produce a concise result artifact.",
+      "Report evidence, risks, and next action."
+    ],
+    "expected_artifacts": [
+      "task_result"
+    ]
+  },
+  "dashboard": {
+    "host": "0.0.0.0",
+    "port": 8765,
+    "refresh_interval_ms": 5000,
+    "max_visible_agents": 80,
+    "simple_level_agent_limit": 8,
+    "state_agent_limit": 60,
+    "collapse_depth": 3,
+    "show_idle_activity": true
+  },
+  "activity": {
+    "recent_event_limit": 300,
+    "event_scan_limit": 1200,
+    "recent_output_items": 12,
+    "recent_tool_items": 12,
+    "recent_event_items": 10,
+    "full_stream_limit": 200,
+    "global_output_limit": 200,
+    "worker_output_limit": 80
+  },
+  "summaries": {
+    "mode": "local",
+    "max_chars": 140,
+    "active_window_seconds": 120,
+    "llm": {
+      "provider": "openrouter",
+      "base_url": "https://openrouter.ai/api/v1/chat/completions",
+      "model": "openai/gpt-oss-120b:free",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "reasoning_enabled": true,
+      "stream": false
+    }
+  },
+  "model_failover": {
+    "enabled": true,
+    "management_fallback_models": [
+      "openai/gpt-oss-120b:free",
+      "openrouter/owl-alpha",
+      "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "nvidia/nemotron-3-super-120b-a12b:free"
+    ],
+    "worker_fallback_models": [
+      "poolside/laguna-m.1:free",
+      "cohere/north-mini-code:free",
+      "openrouter/owl-alpha",
+      "poolside/laguna-xs.2:free",
+      "openai/gpt-oss-20b:free"
+    ],
+    "unavailable_error_fragments": [
+      "model not found",
+      "model metadata",
+      "no endpoints",
+      "invalid model",
+      "unknown model",
+      "does not exist",
+      "degraded function cannot be invoked",
+      "function cannot be invoked"
+    ]
+  },
+  "queue": {
+    "max_active_agents": 20,
+    "lease_seconds": 300,
+    "per_kind_limits": {
+      "llm_request": 10,
+      "tool_call": 20,
+      "worker_run": 10
+    },
+    "per_model_limits": {},
+    "per_tool_limits": {},
+    "allow_same_agent_parallel": false
+  },
+  "agent_inbox": {
+    "backend": "rabbitmq",
+    "rabbitmq": {
+      "host": "workforce-rabbitmq",
+      "port": 5672,
+      "username": "workforce",
+      "password": "workforce",
+      "virtual_host": "/",
+      "exchange": "workforce.agent_inbox",
+      "queue_prefix": "workforce.agent.",
+      "heartbeat": 30,
+      "blocked_connection_timeout": 30
+    }
+  },
+  "icons": {
+    "codex": {
+      "label": "Codex",
+      "image_url": "/assets/agent-icons/codex.png"
+    },
+    "claude": {
+      "label": "Claude",
+      "image_url": ""
+    },
+    "poolside": {
+      "label": "Pool",
+      "image_url": ""
+    },
+    "manager": {
+      "label": "Mgr",
+      "image_url": ""
+    },
+    "executive": {
+      "label": "CEO",
+      "image_url": ""
+    },
+    "generic": {
+      "label": "AI",
+      "image_url": ""
+    }
+  },
+  "workers": {
+    "codex": {
+      "executable": "codex",
+      "profile": "workforce-openrouter",
+      "model": null,
+      "approval_policy": "never",
+      "sandbox_mode": "workspace-write",
+      "timeout_seconds": null
+    },
+    "claude_code": {
+      "executable": "claude",
+      "timeout_seconds": null
+    },
+    "claude_code_interactive": {
+      "executable": "ccr",
+      "args": [
+        "code",
+        "--dangerously-skip-permissions"
+      ],
+      "command": null,
+      "timeout_seconds": 900,
+      "idle_finish_seconds": 2,
+      "input_submit_delay_seconds": 0.35,
+      "steer_interrupt_seconds": 0.8
+    },
+    "generic_cli": {
+      "default_timeout_seconds": null
+    }
+  },
+  "demos": {
+    "sample_repo_fix_workspace": ".workforce_runtime/demo/sample-repo-fix",
+    "long_rfc": {
+      "url": "https://www.rfc-editor.org/rfc/rfc9110.txt",
+      "delay_seconds": 0.8,
+      "worker_timeout_seconds": 90
+    },
+    "web_research": {
+      "worker_timeout_seconds": 60
+    },
+    "simple_status": {
+      "worker_timeout_seconds": 30
+    },
+    "large_org_scale": {
+      "workspace": ".workforce_runtime/demo/large-org-scale",
+      "agent_count": 3000,
+      "active_agent_limit": 20,
+      "management_model": "openai/gpt-oss-120b:free",
+      "worker_model": "poolside/laguna-m.1:free"
+    },
+    "large_task_100": {
+      "workspace": ".workforce_runtime/demo/large-task-100",
+      "plan_path": "examples/Large_Task_100_v0.md",
+      "agent_count": 100,
+      "active_agent_limit": 25,
+      "management_models": [
+        "openai/gpt-oss-120b:free",
+        "openrouter/owl-alpha",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "nvidia/nemotron-3-super-120b-a12b:free"
+      ],
+      "worker_models": [
+        "poolside/laguna-m.1:free",
+        "cohere/north-mini-code:free",
+        "openrouter/owl-alpha",
+        "poolside/laguna-xs.2:free",
+        "openai/gpt-oss-20b:free"
+      ],
+      "llm_json": {
+        "max_retries": 2,
+        "max_tokens": 4000,
+        "reasoning_enabled": false,
+        "stream": true,
+        "retry_initial_delay_seconds": 0.5,
+        "retry_backoff_multiplier": 2,
+        "retry_max_delay_seconds": 5
+      }
+    }
+  },
+  "benchmarks": {
+    "default_case_path": "examples/benchmarks/web_research_real_llm.json",
+    "workspace": ".workforce_runtime/benchmark/workspace",
+    "use_llm": false,
+    "judge": "heuristic",
+    "reset": true,
+    "source_excerpt_chars": 20000,
+    "llm_json": {
+      "max_retries": 2,
+      "max_tokens": 8000,
+      "reasoning_enabled": false,
+      "stream": false,
+      "retry_initial_delay_seconds": 0.25,
+      "retry_backoff_multiplier": 2,
+      "retry_max_delay_seconds": 2
+    },
+    "swe_bench": {
+      "dataset": "SWE-bench/SWE-bench_Lite",
+      "model": "poolside/laguna-m.1:free",
+      "max_tokens": 12000,
+      "test_timeout_seconds": 600,
+      "setup_timeout_seconds": 900
+    }
+  }
+}

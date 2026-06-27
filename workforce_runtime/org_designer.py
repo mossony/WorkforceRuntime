@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
 import re
+import subprocess
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from workforce_runtime.config import load_runtime_config
 from workforce_runtime.core import AgentProfile, Budget, Company, Organization, generate_system_prompt
 from workforce_runtime.core.permissions import (
     APPROVE_BUDGET,
@@ -22,6 +27,9 @@ from workforce_runtime.llm import OpenRouterClient, extract_json_object
 
 DEFAULT_MANAGEMENT_MODEL = "openai/gpt-oss-120b:free"
 DEFAULT_WORKER_MODEL = "poolside/laguna-xs.2:free"
+DEFAULT_DECISION_BACKEND = "codex"
+DEFAULT_MANAGEMENT_WORKER_TYPE = "codex"
+DEFAULT_WORKER_WORKER_TYPE = "codex"
 
 
 class OrgDesignRequest(BaseModel):
@@ -33,13 +41,16 @@ class OrgDesignRequest(BaseModel):
     token_budget: int = Field(default=600000, ge=0)
     management_model: str = DEFAULT_MANAGEMENT_MODEL
     worker_model: str = DEFAULT_WORKER_MODEL
+    decision_backend: str = DEFAULT_DECISION_BACKEND
+    management_worker_type: str = DEFAULT_MANAGEMENT_WORKER_TYPE
+    worker_worker_type: str = DEFAULT_WORKER_WORKER_TYPE
     include_hr: bool = True
     max_management_depth: int = Field(default=3, ge=1, le=5)
 
 
 class OrgDesigner:
     def __init__(self, *, client: OpenRouterClient | None = None) -> None:
-        self.client = client or OpenRouterClient()
+        self.client = client
 
     def design(
         self,
@@ -50,6 +61,10 @@ class OrgDesigner:
     ) -> Organization:
         if use_llm:
             try:
+                if self.client is None:
+                    if request.decision_backend not in {"codex", "claude_code"}:
+                        raise ValueError(f"unsupported org designer decision backend: {request.decision_backend}")
+                    return self._design_with_decision_agent(request)
                 return self._design_with_llm(request)
             except Exception:
                 if not allow_fallback:
@@ -57,6 +72,8 @@ class OrgDesigner:
         return self._fallback_design(request)
 
     def _design_with_llm(self, request: OrgDesignRequest) -> Organization:
+        if self.client is None:
+            raise RuntimeError("OpenRouter org design requires an injected client")
         response = self.client.chat(
             model=request.management_model,
             messages=[
@@ -82,6 +99,16 @@ class OrgDesigner:
         data = extract_json_object(response.content)
         return organization_from_mapping(data, request=request)
 
+    def _design_with_decision_agent(self, request: OrgDesignRequest) -> Organization:
+        if request.decision_backend == "codex":
+            response_text = _run_codex_org_design(request)
+        elif request.decision_backend == "claude_code":
+            response_text = _run_claude_org_design(request)
+        else:
+            raise ValueError(f"unsupported org designer decision backend: {request.decision_backend}")
+        data = extract_json_object(response_text)
+        return organization_from_mapping(data, request=request)
+
     def _fallback_design(self, request: OrgDesignRequest) -> Organization:
         goal_kind = _goal_kind(request.goal)
         department = "Research" if goal_kind == "research" else "Engineering"
@@ -100,7 +127,7 @@ class OrgDesigner:
                 name="CEO Agent",
                 role="CEO",
                 department="Executive",
-                worker_type="openrouter_manager",
+                worker_type=_management_worker_type(request),
                 model=request.management_model,
                 responsibilities=[
                     "Turn the human goal into executive priorities",
@@ -118,7 +145,7 @@ class OrgDesigner:
                     role="HR Manager",
                     department="People",
                     manager_id="ceo",
-                    worker_type="openrouter_manager",
+                    worker_type=_management_worker_type(request),
                     model=request.management_model,
                     responsibilities=[
                         "Check headcount and token budget before hiring",
@@ -139,7 +166,7 @@ class OrgDesigner:
                     role=vp_role,
                     department=department,
                     manager_id="ceo",
-                    worker_type="openrouter_manager",
+                    worker_type=_management_worker_type(request),
                     model=request.management_model,
                     responsibilities=[
                         "Convert executive goal into manager-ready work",
@@ -160,7 +187,7 @@ class OrgDesigner:
                 role=manager_role,
                 department=department,
                 manager_id=manager_parent,
-                worker_type="openrouter_manager",
+                worker_type=_management_worker_type(request),
                 model=request.management_model,
                 responsibilities=[
                     "Create concrete worker task contracts",
@@ -177,7 +204,7 @@ class OrgDesigner:
                 role=worker_role,
                 department=department,
                 manager_id=manager_id,
-                worker_type="openrouter_worker",
+                worker_type=_worker_worker_type(request),
                 model=request.worker_model,
                 responsibilities=[worker_responsibility, "Submit artifacts and structured reports"],
                 permissions=[READ_REPO, SUBMIT_ARTIFACT, REPORT],
@@ -192,7 +219,7 @@ class OrgDesigner:
                     role="Peer Reviewer",
                     department=department,
                     manager_id=manager_id,
-                    worker_type="openrouter_worker",
+                    worker_type=_worker_worker_type(request),
                     model=request.worker_model,
                     responsibilities=["Receive peer discussion and sanity-check evidence"],
                     permissions=[READ_REPO, REPORT],
@@ -234,7 +261,7 @@ def organization_from_mapping(data: dict[str, Any], *, request: OrgDesignRequest
         used_ids.add(agent_id)
         manager_id = item.get("manager_id")
         manager = str(manager_id) if manager_id else None
-        worker_type = str(item.get("worker_type") or _worker_type_for_role(role))
+        worker_type = _normalize_worker_type(str(item.get("worker_type") or ""), role=role, request=request)
         model = str(item.get("model") or _model_for_role(role, request))
         agents.append(
             AgentProfile(
@@ -291,7 +318,7 @@ Return JSON only:
       "role": string,
       "department": string,
       "manager_id": string or null,
-      "worker_type": "openrouter_manager" or "openrouter_worker",
+      "worker_type": "{_management_worker_type(request)}" for CEO, HR, VPs, and managers; "{_worker_worker_type(request)}" for terminal workers,
       "model": string,
       "responsibilities": [string],
       "permissions": [string],
@@ -301,10 +328,12 @@ Return JSON only:
 }}
 
 Constraints:
-    - Return exactly {request.headcount_limit} agents unless impossible.
-    - Company headcount_limit must be {request.headcount_limit}.
+- Return exactly {request.headcount_limit} agents unless impossible.
+- Company headcount_limit must be {request.headcount_limit}.
 - Use {request.management_model} for CEO, HR, VPs, and managers.
 - Use {request.worker_model} for terminal workers.
+- Use worker_type "{_management_worker_type(request)}" for every decision-making agent.
+- Use worker_type "{_worker_worker_type(request)}" for terminal workers.
 - Include exactly one root CEO with manager_id null.
 - CEO needs delegate_task, approve_budget, hire_agent, report, and report_to_human.
 - Include HR if useful for headcount or token budget decisions.
@@ -363,7 +392,7 @@ def _ensure_requested_headcount(
                 role=role,
                 department=role_department,
                 manager_id=parent_id,
-                worker_type="openrouter_worker",
+                worker_type=_worker_worker_type(request),
                 model=request.worker_model,
                 responsibilities=[responsibility, "Submit artifacts and structured reports"],
                 permissions=[READ_REPO, SUBMIT_ARTIFACT, REPORT],
@@ -414,15 +443,135 @@ def _unique_id(value: str, used: set[str]) -> str:
     return candidate
 
 
-def _worker_type_for_role(role: str) -> str:
+def _run_codex_org_design(request: OrgDesignRequest) -> str:
+    config = load_runtime_config()
+    codex_config = config.get("workers", {}).get("codex", {})
+    workspace_root = Path(str(config.get("runtime", {}).get("workspace_root") or ".workforce_runtime"))
+    run_dir = workspace_root / "org_design" / f"codex_{uuid4().hex[:12]}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    prompt = _decision_agent_org_design_prompt(request)
+    prompt_path = run_dir / "prompt.txt"
+    response_path = run_dir / "organization-response.txt"
+    stdout_path = run_dir / "stdout.txt"
+    stderr_path = run_dir / "stderr.txt"
+    prompt_path.write_text(prompt)
+    command = [
+        str(codex_config.get("executable") or "codex"),
+        "--profile",
+        str(codex_config.get("profile") or "workforce-openrouter"),
+        "-m",
+        request.management_model,
+        "-a",
+        str(codex_config.get("approval_policy") or "never"),
+        "-s",
+        str(codex_config.get("sandbox_mode") or "workspace-write"),
+        "-C",
+        str(Path.cwd()),
+        "exec",
+        "--output-last-message",
+        str(response_path),
+        prompt,
+    ]
+    result = subprocess.run(
+        command,
+        cwd=Path.cwd(),
+        capture_output=True,
+        text=True,
+        timeout=_optional_timeout_seconds(codex_config.get("timeout_seconds"), default=300),
+        check=False,
+    )
+    stdout_path.write_text(result.stdout)
+    stderr_path.write_text(result.stderr)
+    if result.returncode != 0:
+        raise RuntimeError(f"Codex org design failed with exit code {result.returncode}: {result.stderr[-1000:]}")
+    if response_path.exists() and response_path.read_text().strip():
+        return response_path.read_text()
+    return result.stdout
+
+
+def _run_claude_org_design(request: OrgDesignRequest) -> str:
+    config = load_runtime_config()
+    claude_config = config.get("workers", {}).get("claude_code", {})
+    workspace_root = Path(str(config.get("runtime", {}).get("workspace_root") or ".workforce_runtime"))
+    run_dir = workspace_root / "org_design" / f"claude_{uuid4().hex[:12]}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    prompt = _decision_agent_org_design_prompt(request)
+    prompt_path = run_dir / "prompt.txt"
+    stdout_path = run_dir / "stdout.json"
+    stderr_path = run_dir / "stderr.txt"
+    prompt_path.write_text(prompt)
+    command = [
+        str(claude_config.get("executable") or "claude"),
+        "-p",
+        prompt,
+        "--output-format",
+        "json",
+    ]
+    result = subprocess.run(
+        command,
+        cwd=Path.cwd(),
+        capture_output=True,
+        text=True,
+        timeout=_optional_timeout_seconds(claude_config.get("timeout_seconds"), default=300),
+        check=False,
+    )
+    stdout_path.write_text(result.stdout)
+    stderr_path.write_text(result.stderr)
+    if result.returncode != 0:
+        raise RuntimeError(f"Claude org design failed with exit code {result.returncode}: {result.stderr[-1000:]}")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return result.stdout
+    return str(payload.get("result") or payload.get("content") or payload.get("text") or result.stdout)
+
+
+def _decision_agent_org_design_prompt(request: OrgDesignRequest) -> str:
+    return (
+        "You are a Workforce Runtime organization design agent running inside Codex or Claude Code. "
+        "Design the organization by returning only a JSON object. Do not include Markdown fences, prose, or commentary.\n\n"
+        f"{_org_design_prompt(request)}"
+    )
+
+
+def _optional_timeout_seconds(value: object, *, default: int) -> int:
+    if value in {None, ""}:
+        return default
+    return int(value)
+
+
+def _management_worker_type(request: OrgDesignRequest) -> str:
+    return _normalized_runtime_worker_type(request.management_worker_type, default=DEFAULT_MANAGEMENT_WORKER_TYPE)
+
+
+def _worker_worker_type(request: OrgDesignRequest) -> str:
+    return _normalized_runtime_worker_type(request.worker_worker_type, default=DEFAULT_WORKER_WORKER_TYPE)
+
+
+def _normalized_runtime_worker_type(value: str, *, default: str) -> str:
+    normalized = (value or default).strip()
+    if normalized in {"openrouter_manager", "openrouter_worker"}:
+        return default
+    return normalized or default
+
+
+def _normalize_worker_type(value: str, *, role: str, request: OrgDesignRequest) -> str:
+    lowered_value = value.strip().lower()
+    if lowered_value in {"", "openrouter_manager", "openrouter_worker"}:
+        return _worker_type_for_role(role, request)
+    return value.strip()
+
+
+def _worker_type_for_role(role: str, request: OrgDesignRequest) -> str:
     lowered = role.lower()
     if any(term in lowered for term in ("ceo", "vp", "manager", "lead", "hr")):
-        return "openrouter_manager"
-    return "openrouter_worker"
+        return _management_worker_type(request)
+    return _worker_worker_type(request)
 
 
 def _model_for_role(role: str, request: OrgDesignRequest) -> str:
-    return request.management_model if _worker_type_for_role(role) == "openrouter_manager" else request.worker_model
+    lowered = role.lower()
+    return request.management_model if any(term in lowered for term in ("ceo", "vp", "manager", "lead", "hr")) else request.worker_model
 
 
 def _permissions_for_item(item: dict[str, Any], role: str) -> list[str]:

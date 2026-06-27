@@ -38,6 +38,7 @@ def generate_system_prompt(company: Company, agent: AgentProfile) -> str:
             "- Use assign() only for agents under your reporting line.",
             "- Use discuss() for peer or cross-functional messages.",
             "- Use report() to send completion status to your direct manager.",
+            "- Use review_report() when assigned a report-review task; include an explicit accept, reject, request_retry, escalate, or request_human_review decision.",
             _human_report_rule(agent),
             "- Use get_agent_profiles() before assignment decisions when prior agent experience could affect routing.",
             "- Use get_task_dossier() to pull requirements, division of work, task documents, reports, and artifacts when you need context.",

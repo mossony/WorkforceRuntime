@@ -9,6 +9,7 @@ from workforce_runtime.config import format_model_context_note, load_runtime_con
 from workforce_runtime.core import Artifact, ReportContract, TaskContract, UsageCost
 from workforce_runtime.storage import FileStore
 from workforce_runtime.workers.base import RuntimeContext, WorkerRun
+from workforce_runtime.workers.env import worker_process_env
 from workforce_runtime.workers.process_runner import run_process_streaming
 from workforce_runtime.workers.sandbox import apply_process_sandbox, record_sandbox_application, worker_extra_args
 from workforce_runtime.workers.session_resume import (
@@ -61,12 +62,14 @@ class CodexWorker:
             actor_id=runtime_context.agent_id,
         )
 
+        agent = runtime_context.runtime.get_agent(runtime_context.agent_id)
+        command_model = self.model or (agent.model if agent is not None else None)
         command = [
             self.codex_executable,
             *worker_extra_args("codex"),
             "--profile",
             self.profile,
-            *(["-m", str(self.model)] if self.model else []),
+            *(["-m", str(command_model)] if command_model else []),
             "-a",
             self.approval_policy,
             "-s",
@@ -91,7 +94,13 @@ class CodexWorker:
         streamed = run_process_streaming(
             command=sandboxed.command,
             cwd=workspace,
-            env=None,
+            env=worker_process_env(
+                runtime_context,
+                run_id=run_id,
+                task=task,
+                task_contract_path=task_contract_path,
+                run_dir=task_dir,
+            ),
             timeout_seconds=self.timeout_seconds,
             runtime=runtime_context.runtime,
             file_store=file_store,
@@ -114,7 +123,7 @@ class CodexWorker:
         session_metadata: dict[str, object] = {
             "executable": self.codex_executable,
             "profile": self.profile,
-            "model": self.model or "",
+            "model": command_model or "",
             "approval_policy": self.approval_policy,
             "sandbox_mode": self.sandbox_mode,
             "execution_mode": sandboxed.metadata.get("execution_mode", "full_access"),
@@ -253,6 +262,7 @@ When Workforce Runtime MCP tools are available:
 - Use upsert_task_doc() to preserve new requirements, decisions, notes, risks, or division-of-work updates.
 - Use request_tool() when repeated missing capabilities make the task unnecessarily manual.
 - Use report() and submit_artifact() for completion evidence.
+- If this is a report-review task, inspect the report and artifacts, then call review_report() with an explicit decision.
 
 When you finish, provide a concise final report with:
 - summary

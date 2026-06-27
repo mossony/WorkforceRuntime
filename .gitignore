@@ -1,5 +1,7 @@
 *.egg-info/
 .venv/
+.DS_Store
+node_modules/
 .workforce_runtime/
 .playwright-cli/
 __pycache__/

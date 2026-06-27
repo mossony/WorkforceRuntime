@@ -1,0 +1,64 @@
+services:
+  workforce-mysql:
+    image: mysql:8.4
+    container_name: workforce-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: workforce_root
+      MYSQL_DATABASE: workforce_runtime
+      MYSQL_USER: workforce
+      MYSQL_PASSWORD: workforce
+    ports:
+      - "3306:3306"
+    volumes:
+      - workforce_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uworkforce -pworkforce --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  workforce-rabbitmq:
+    image: rabbitmq:3-management
+    container_name: workforce-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: workforce
+      RABBITMQ_DEFAULT_PASS: workforce
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - workforce_rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  workforce-runtime:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: workforce-runtime:local
+    container_name: workforce-runtime
+    depends_on:
+      workforce-mysql:
+        condition: service_healthy
+      workforce-rabbitmq:
+        condition: service_healthy
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+    ports:
+      - "${WORKFORCE_RUNTIME_PORT:-8765}:8765"
+    volumes:
+      - workforce_runtime_workspace:/app/.workforce_runtime
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=3).read()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  workforce_mysql_data:
+  workforce_rabbitmq_data:
+  workforce_runtime_workspace:

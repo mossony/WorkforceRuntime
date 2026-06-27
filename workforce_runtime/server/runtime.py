@@ -284,10 +284,9 @@ class WorkforceRuntime:
             )
             broker_items = []
         now = _utc_now()
-        for broker_item in broker_items:
-            stored = self.store.get_agent_inbox_item(broker_item.inbox_item_id) or broker_item
+        def lease(stored: AgentInboxItem) -> AgentInboxItem | None:
             if stored.status != "queued":
-                continue
+                return None
             leased = stored.model_copy(
                 update={
                     "status": "leased",
@@ -304,7 +303,32 @@ class WorkforceRuntime:
                 task_id=leased.task_id,
                 payload=_agent_inbox_event_payload(leased),
             )
-            claimed.append(leased)
+            return leased
+
+        for broker_item in broker_items:
+            stored = self.store.get_agent_inbox_item(broker_item.inbox_item_id)
+            if stored is None:
+                self.record_event(
+                    event_type="agent_inbox_stale_broker_item_ignored",
+                    actor_id=lease_owner,
+                    task_id=broker_item.task_id,
+                    payload=_agent_inbox_event_payload(broker_item),
+                )
+                continue
+            leased = lease(stored)
+            if leased is not None:
+                claimed.append(leased)
+        if len(claimed) < limit:
+            queued = [
+                item
+                for item in self.store.list_agent_inbox_items(agent_id=agent_id, status="queued")
+                if item.inbox_item_id not in {claimed_item.inbox_item_id for claimed_item in claimed}
+            ]
+            queued.sort(key=lambda item: (-item.priority, item.created_at))
+            for stored in queued[: max(0, limit - len(claimed))]:
+                leased = lease(stored)
+                if leased is not None:
+                    claimed.append(leased)
         return claimed
 
     def complete_agent_inbox_item(
@@ -1468,8 +1492,22 @@ class WorkforceRuntime:
                 "active_task_ids": [task.task_id for task in active_tasks],
             },
         )
+        inbox_item = self.enqueue_agent_inbox_item(
+            agent_id=target_agent_id,
+            kind="system_notice",
+            from_agent_id=manager_id,
+            task_id=task_id,
+            payload={
+                "message": message or "Manager requested a progress update.",
+                "progress_check_event_id": event.event_id,
+                "active_task_ids": [task.task_id for task in active_tasks],
+            },
+            priority=5,
+            idempotency_key=f"progress_check:{event.event_id}:{target_agent_id}",
+        )
         return {
             "event_id": event.event_id,
+            "inbox_item_id": inbox_item.inbox_item_id,
             "target_agent": target.model_dump(mode="json"),
             "active_tasks": [task.model_dump(mode="json") for task in active_tasks],
             "recent_reports": [report.model_dump(mode="json") for report in relevant_reports],
@@ -1703,7 +1741,14 @@ class WorkforceRuntime:
         if report is None:
             raise KeyError(f"report not found: {report_id}")
 
-        review_decision = decision or self._default_review_decision(report)
+        if not decision:
+            raise ValueError("review_report requires an explicit decision; automatic manager review decisions are disabled")
+        if reviewer_id not in {"human", "system", "runtime"}:
+            if reviewer_id != report.to_agent_id:
+                raise PermissionError(f"report {report_id} must be reviewed by recipient manager {report.to_agent_id}")
+            self.require_task_access(reviewer_id, report.task_id)
+
+        review_decision = decision
         if review_decision == "accept":
             task_status: TaskStatus = "completed"
         elif review_decision == "reject":
@@ -1777,15 +1822,6 @@ class WorkforceRuntime:
             ],
             required_artifacts=[],
         )
-
-    def _default_review_decision(self, report: ReportContract) -> str:
-        if report.blockers:
-            return "request_retry"
-        if report.status not in {"completed", "success", "done"}:
-            return "reject"
-        if report.confidence < 0.5:
-            return "request_human_review"
-        return "accept"
 
     def _create_and_run_manager_review(self, task: TaskContract, report: ReportContract) -> TaskContract:
         review_task = TaskContract(

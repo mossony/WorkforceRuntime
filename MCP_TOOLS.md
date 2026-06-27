@@ -33,7 +33,32 @@ Common optional fields:
 - `requires_decision`
 - `alignment_check`
 
-Accepted reports trigger manager review in the runtime.
+Reports trigger a manager-review inbox item in the runtime. The runtime does
+not auto-accept or auto-reject reports; a manager must explicitly call
+`review_report`.
+
+### `review_report`
+
+Records an explicit manager decision for a subordinate report and updates the
+reviewed task status.
+
+Required fields:
+
+- `from_agent_id`
+- `report_id`
+- `decision`
+
+Allowed decisions:
+
+- `accept`
+- `reject`
+- `request_retry`
+- `escalate`
+- `request_human_review`
+
+Optional fields:
+
+- `notes`
 
 ### `report_to_human`
 
@@ -85,7 +110,11 @@ Expected arguments:
 
 ### `check_progress`
 
-Lets a manager inspect and record the current progress of a subordinate. The tool returns the target agent, active tasks, recent reports, and recent events. The caller must manage the target agent directly or indirectly.
+Lets a manager inspect and record the current progress of a subordinate. The
+tool also enqueues a `system_notice` in the subordinate's inbox, so the check
+can be handled by the worker/manager dispatcher. The tool returns the target
+agent, active tasks, recent reports, recent events, and inbox item id. The
+caller must manage the target agent directly or indirectly.
 
 Expected arguments:
 
@@ -262,4 +291,4 @@ Expected arguments:
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"update_status","arguments":{"agent_id":"codex_worker","task_id":"task_001","status":"in_progress"}}}
 ```
 
-Workers should call `submit_artifact` for durable evidence and `report` before claiming completion. Managers should use `assign` for task delegation, `check_progress` for subordinate status checks, and `discuss` for non-task messages.
+Workers should call `submit_artifact` for durable evidence and `report` before claiming completion. Managers should use `assign` for task delegation, `check_progress` for subordinate status checks, `review_report` for report review decisions, and `discuss` for non-task messages.

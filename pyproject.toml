@@ -27,5 +27,16 @@ workforce-runtime = "workforce_runtime.__main__:main"
 [tool.setuptools.packages.find]
 include = ["workforce_runtime*"]
 
+[tool.setuptools.package-data]
+workforce_runtime = [
+  "dashboard/assets/*.js",
+  "dashboard/static/*.html",
+  "dashboard/static/assets/*",
+  "dashboard/frontend/*.html",
+  "dashboard/frontend/*.js",
+  "dashboard/frontend/*.json",
+  "dashboard/frontend/src/*",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

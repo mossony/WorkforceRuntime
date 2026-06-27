@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
 from workforce_runtime.dashboard import render_agent_trajectories, render_event_replay, render_text_dashboard
 from workforce_runtime.dashboard.v2_dashboard import render_v2_shadow_dashboard
 from workforce_runtime.dashboard.web_dashboard import add_web_dashboard_args, serve_web_dashboard
-from workforce_runtime.config import load_runtime_config
+from workforce_runtime.config import DEFAULT_RUNTIME_CONFIG_PATH, load_runtime_config, save_runtime_config
 from workforce_runtime.evals import (
     build_swe_bench_comparison_cases,
     load_benchmark_case,
@@ -16,6 +17,13 @@ from workforce_runtime.evals import (
     load_swe_bench_instances_from_hf,
     run_benchmark_case,
     run_swe_bench_instance,
+)
+from workforce_runtime.mcp.oauth import (
+    DEFAULT_OAUTH_TIMEOUT_SECONDS,
+    MCPAuthProbeResult,
+    OAuthMetadata,
+    perform_oauth_login,
+    probe_mcp_auth,
 )
 from workforce_runtime.org_designer import OrgDesigner, OrgDesignRequest, organization_to_yaml
 from workforce_runtime.server.demo import (
@@ -57,7 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
     org_design.add_argument("--token-budget", type=int, default=None)
     org_design.add_argument("--management-model", default=None)
     org_design.add_argument("--worker-model", default=None)
-    org_design.add_argument("--use-llm", action="store_true", help="Use OpenRouter for org design when configured")
+    org_design.add_argument("--decision-backend", choices=["codex", "claude_code"], default=None)
+    org_design.add_argument("--management-worker-type", default=None)
+    org_design.add_argument("--worker-worker-type", default=None)
+    org_design.add_argument("--use-llm", action="store_true", help="Use the configured Codex/Claude decision agent for org design")
     org_design.add_argument("--format", choices=["yaml", "json"], default="yaml")
     org_design.add_argument("--out", type=Path, default=None, help="Optional output file")
 
@@ -95,6 +106,44 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_subparsers.add_parser("serve", help="Run the Workforce Runtime MCP stdio server")
     mcp_dashboard = mcp_subparsers.add_parser("dashboard", help="Serve the Workforce Runtime web dashboard")
     add_web_dashboard_args(mcp_dashboard)
+    mcp_external = mcp_subparsers.add_parser("external", help="Manage centrally proxied external MCP servers")
+    external_subparsers = mcp_external.add_subparsers(dest="external_command")
+    external_probe = external_subparsers.add_parser("probe", help="Detect external MCP auth requirements")
+    external_probe.add_argument("--url", required=True)
+    external_probe.add_argument("--timeout", type=float, default=5.0)
+    external_login = external_subparsers.add_parser("login", help="Run OAuth browser login for an external MCP server")
+    external_login.add_argument("server_id")
+    external_login.add_argument("--url", required=True)
+    external_login.add_argument("--scope", action="append", default=[])
+    external_login.add_argument("--client-id", default="")
+    external_login.add_argument("--client-id-env", default="")
+    external_login.add_argument("--client-secret", default="")
+    external_login.add_argument("--client-secret-env", default="")
+    external_login.add_argument("--resource", default="")
+    external_login.add_argument("--callback-port", type=int, default=None)
+    external_login.add_argument("--callback-url", default="")
+    external_login.add_argument("--timeout", type=int, default=None)
+    external_login.add_argument("--no-browser", action="store_true")
+    external_connect = external_subparsers.add_parser("connect", help="Probe, authenticate, and save an external MCP server config")
+    external_connect.add_argument("--id", required=True)
+    external_connect.add_argument("--url", required=True)
+    external_connect.add_argument("--tool-prefix", default="")
+    external_connect.add_argument("--allowed-agent-id", action="append", default=[])
+    external_connect.add_argument("--allowed-role", action="append", default=[])
+    external_connect.add_argument("--allowed-department", action="append", default=[])
+    external_connect.add_argument("--allowed-worker-type", action="append", default=[])
+    external_connect.add_argument("--allowed-tool", action="append", default=[])
+    external_connect.add_argument("--scope", action="append", default=[])
+    external_connect.add_argument("--client-id", default="")
+    external_connect.add_argument("--client-id-env", default="")
+    external_connect.add_argument("--client-secret", default="")
+    external_connect.add_argument("--client-secret-env", default="")
+    external_connect.add_argument("--resource", default="")
+    external_connect.add_argument("--bearer-token-env", default="")
+    external_connect.add_argument("--callback-port", type=int, default=None)
+    external_connect.add_argument("--callback-url", default="")
+    external_connect.add_argument("--timeout", type=int, default=None)
+    external_connect.add_argument("--no-browser", action="store_true")
 
     task_parser = subparsers.add_parser("task", help="Task commands")
     task_subparsers = task_parser.add_subparsers(dest="task_command")
@@ -124,7 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_report.add_argument(
         "--decision",
         choices=["accept", "reject", "request_retry", "escalate", "request_human_review"],
-        default=None,
+        required=True,
     )
     review_report.add_argument("--notes", default="")
 
@@ -138,7 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Workspace directory for benchmark artifacts",
     )
-    benchmark_run.add_argument("--use-llm", action="store_true", help="Use OpenRouter calls for design and agents")
+    benchmark_run.add_argument("--use-llm", action="store_true", help="Use the legacy OpenRouter benchmark harness for model-eval cases")
     benchmark_run.add_argument("--judge", choices=["none", "heuristic", "llm"], default=None)
     benchmark_run.add_argument("--no-reset", action="store_true", help="Do not delete existing benchmark DB/workspace")
     swe_plan = benchmark_subparsers.add_parser("swe-bench-plan", help="Create single/distributed benchmark cases for a SWE-bench instance JSON")
@@ -202,6 +251,9 @@ def main(argv: list[str] | None = None) -> None:
             token_budget=args.token_budget if args.token_budget is not None else int(org_defaults.get("token_budget") or 600000),
             management_model=args.management_model or str(org_defaults.get("management_model") or "openai/gpt-oss-120b:free"),
             worker_model=args.worker_model or str(org_defaults.get("worker_model") or "poolside/laguna-xs.2:free"),
+            decision_backend=args.decision_backend or str(org_defaults.get("decision_backend") or "codex"),
+            management_worker_type=args.management_worker_type or str(org_defaults.get("management_worker_type") or "codex"),
+            worker_worker_type=args.worker_worker_type or str(org_defaults.get("worker_worker_type") or "codex"),
             include_hr=bool(org_defaults.get("include_hr", True)),
             max_management_depth=int(org_defaults.get("max_management_depth") or 3),
         )
@@ -323,6 +375,10 @@ def main(argv: list[str] | None = None) -> None:
             port=args.port or int(dashboard_section.get("port") or 8765),
             config_path=args.dashboard_config_path or args.runtime_config_path,
         )
+        return
+
+    if args.command == "mcp" and args.mcp_command == "external":
+        _handle_mcp_external(args, runtime_config)
         return
 
     if args.command == "task" and args.task_command == "create":
@@ -506,3 +562,193 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     print("Workforce Runtime: organization runtime skeleton is ready.")
+
+
+def _handle_mcp_external(args: argparse.Namespace, runtime_config: dict[str, object]) -> None:
+    if args.external_command == "probe":
+        result = probe_mcp_auth(args.url, timeout_seconds=args.timeout)
+        print(json.dumps(_probe_result_to_json(result), indent=2))
+        return
+
+    if args.external_command == "login":
+        oauth_defaults = _external_mcp_oauth_defaults(runtime_config)
+        timeout = _external_mcp_oauth_timeout(args, oauth_defaults)
+        callback_url = args.callback_url or str(oauth_defaults.get("callback_url") or "")
+        callback_port = args.callback_port if args.callback_port is not None else _optional_int(oauth_defaults.get("callback_port"))
+        probe = probe_mcp_auth(args.url, timeout_seconds=min(float(timeout), 10.0))
+        metadata = probe.oauth_metadata if probe.auth_status == "oauth" else None
+        result = perform_oauth_login(
+            server_id=args.server_id,
+            url=args.url,
+            metadata=metadata,
+            scopes=args.scope,
+            client_id=_arg_or_env(args.client_id, args.client_id_env, "client id"),
+            client_secret=_arg_or_env(args.client_secret, args.client_secret_env, "client secret"),
+            resource=args.resource,
+            callback_port=callback_port,
+            callback_url=callback_url,
+            timeout_seconds=timeout,
+            open_browser=not args.no_browser,
+        )
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "server_id": result.server_id,
+                    "url": result.url,
+                    "client_id": result.client_id,
+                    "token_path": str(result.token_path),
+                    "scopes": list(result.scopes),
+                    "expires_at": result.expires_at,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    if args.external_command == "connect":
+        auth: dict[str, object]
+        oauth_defaults = _external_mcp_oauth_defaults(runtime_config)
+        timeout = _external_mcp_oauth_timeout(args, oauth_defaults)
+        callback_url = args.callback_url or str(oauth_defaults.get("callback_url") or "")
+        callback_port = args.callback_port if args.callback_port is not None else _optional_int(oauth_defaults.get("callback_port"))
+        probe = probe_mcp_auth(args.url, timeout_seconds=min(float(timeout), 10.0))
+        if args.bearer_token_env:
+            auth = {"type": "bearer", "token_env": args.bearer_token_env}
+        elif probe.auth_status == "oauth":
+            result = perform_oauth_login(
+                server_id=args.id,
+                url=args.url,
+                metadata=probe.oauth_metadata,
+                scopes=args.scope,
+                client_id=_arg_or_env(args.client_id, args.client_id_env, "client id"),
+                client_secret=_arg_or_env(args.client_secret, args.client_secret_env, "client secret"),
+                resource=args.resource,
+                callback_port=callback_port,
+                callback_url=callback_url,
+                timeout_seconds=timeout,
+                open_browser=not args.no_browser,
+            )
+            auth = {"type": "oauth"}
+            if args.client_id:
+                auth["client_id"] = args.client_id
+            if args.client_id_env:
+                auth["client_id_env"] = args.client_id_env
+            if args.client_secret_env:
+                auth["client_secret_env"] = args.client_secret_env
+            if args.resource:
+                auth["resource"] = args.resource
+            if args.scope:
+                auth["scope"] = args.scope
+            print(f"Stored OAuth token for {result.server_id} at {result.token_path}")
+        elif probe.auth_status == "none":
+            auth = {"type": "none"}
+        else:
+            raise SystemExit(
+                "External MCP server requires authentication that was not auto-configured. "
+                f"Probe result: {json.dumps(_probe_result_to_json(probe), indent=2)}. "
+                "Pass --bearer-token-env for bearer/PAT auth or use an OAuth-capable MCP endpoint."
+            )
+
+        server_entry = {
+            "id": args.id,
+            "enabled": True,
+            "transport": "http",
+            "url": args.url,
+            "tool_prefix": args.tool_prefix or args.id,
+            "auth": auth,
+            "allowed_agent_ids": args.allowed_agent_id or ["*"],
+            "allowed_roles": args.allowed_role,
+            "allowed_departments": args.allowed_department,
+            "allowed_worker_types": args.allowed_worker_type,
+            "allowed_tools": args.allowed_tool or ["*"],
+            "timeout_seconds": timeout,
+            "queue": {"enabled": True},
+            "tools": [],
+        }
+        _upsert_external_mcp_server(runtime_config, server_entry)
+        config_path = save_runtime_config(runtime_config, args.runtime_config_path or DEFAULT_RUNTIME_CONFIG_PATH)
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "server": server_entry,
+                    "config_path": str(config_path),
+                    "probe": _probe_result_to_json(probe),
+                },
+                indent=2,
+            )
+        )
+        return
+
+    raise SystemExit("choose an external MCP command: probe, login, or connect")
+
+
+def _external_mcp_oauth_defaults(config: dict[str, object]) -> dict[str, object]:
+    external = config.get("external_mcp") if isinstance(config.get("external_mcp"), dict) else {}
+    oauth = external.get("oauth") if isinstance(external.get("oauth"), dict) else {}
+    return oauth
+
+
+def _external_mcp_oauth_timeout(args: argparse.Namespace, defaults: dict[str, object]) -> int:
+    if args.timeout is not None:
+        return int(args.timeout)
+    configured = _optional_int(defaults.get("timeout_seconds"))
+    return configured if configured is not None else DEFAULT_OAUTH_TIMEOUT_SECONDS
+
+
+def _probe_result_to_json(result: MCPAuthProbeResult) -> dict[str, object]:
+    return {
+        "url": result.url,
+        "auth_status": result.auth_status,
+        "oauth_metadata": _oauth_metadata_to_json(result.oauth_metadata),
+        "www_authenticate": result.www_authenticate,
+        "error": result.error,
+    }
+
+
+def _oauth_metadata_to_json(metadata: OAuthMetadata | None) -> dict[str, object] | None:
+    if metadata is None:
+        return None
+    return {
+        "issuer": metadata.issuer,
+        "authorization_endpoint": metadata.authorization_endpoint,
+        "token_endpoint": metadata.token_endpoint,
+        "registration_endpoint": metadata.registration_endpoint,
+        "scopes_supported": list(metadata.scopes_supported),
+    }
+
+
+def _arg_or_env(value: str, env_name: str, label: str) -> str:
+    if value:
+        return value
+    if not env_name:
+        return ""
+    env_value = os.environ.get(env_name)
+    if not env_value:
+        raise SystemExit(f"{label} environment variable is not set: {env_name}")
+    return env_value
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _upsert_external_mcp_server(config: dict[str, object], server_entry: dict[str, object]) -> None:
+    external = config.setdefault("external_mcp", {})
+    if not isinstance(external, dict):
+        raise ValueError("runtime config external_mcp must be an object")
+    servers = external.setdefault("servers", [])
+    if not isinstance(servers, list):
+        raise ValueError("runtime config external_mcp.servers must be a list")
+    server_id = str(server_entry["id"])
+    for index, existing in enumerate(servers):
+        if isinstance(existing, dict) and existing.get("id") == server_id:
+            servers[index] = server_entry
+            return
+    servers.append(server_entry)

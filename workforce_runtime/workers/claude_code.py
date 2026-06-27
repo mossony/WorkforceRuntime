@@ -9,6 +9,7 @@ from workforce_runtime.config import load_runtime_config
 from workforce_runtime.core import Artifact, ReportContract, TaskContract, UsageCost
 from workforce_runtime.storage import FileStore
 from workforce_runtime.workers.base import RuntimeContext, WorkerRun
+from workforce_runtime.workers.env import worker_process_env
 from workforce_runtime.workers.process_runner import run_process_streaming
 from workforce_runtime.workers.sandbox import apply_process_sandbox, record_sandbox_application, worker_extra_args
 from workforce_runtime.workers.session_resume import (
@@ -73,7 +74,13 @@ class ClaudeCodeWorker:
         streamed = run_process_streaming(
             command=sandboxed.command,
             cwd=workspace,
-            env=None,
+            env=worker_process_env(
+                runtime_context,
+                run_id=run_id,
+                task=task,
+                task_contract_path=task_contract_path,
+                run_dir=task_dir,
+            ),
             timeout_seconds=self.timeout_seconds,
             runtime=runtime_context.runtime,
             file_store=file_store,
@@ -221,6 +228,7 @@ You must work only within the given workspace.
 You must respect all constraints.
 
 When Workforce Runtime MCP tools are available, use them to report progress and submit artifacts.
+If this is a report-review task, inspect the report and artifacts, then call review_report() with an explicit decision.
 When you finish, provide a concise final report with summary, status, work done, evidence, risks, blockers, confidence, cost estimate, next action, and whether a decision is required.
 """
 

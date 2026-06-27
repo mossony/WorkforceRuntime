@@ -1,0 +1,13 @@
+.git
+.venv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.DS_Store
+.workforce_runtime
+__pycache__
+*.pyc
+*.sqlite
+*.sqlite3
+*.db
+node_modules

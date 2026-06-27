@@ -115,9 +115,12 @@
     "token_budget": 600000,
     "management_model": "openai/gpt-oss-120b:free",
     "worker_model": "poolside/laguna-xs.2:free",
+    "decision_backend": "codex",
+    "management_worker_type": "codex",
+    "worker_worker_type": "codex",
     "include_hr": true,
     "max_management_depth": 3,
-    "use_llm": false
+    "use_llm": true
   },
   "designed_task": {
     "company_name": "Designed Task Workforce",
@@ -126,6 +129,9 @@
     "management_model": "openai/gpt-oss-120b:free",
     "worker_model": "poolside/laguna-m.1:free",
     "judge_model": "openai/gpt-oss-120b:free",
+    "decision_backend": "codex",
+    "management_worker_type": "codex",
+    "worker_worker_type": "codex",
     "use_llm": true,
     "judge": "heuristic",
     "reset": false,
@@ -223,6 +229,99 @@
       "queue_prefix": "workforce.agent.",
       "heartbeat": 30,
       "blocked_connection_timeout": 30
+    }
+  },
+  "external_mcp": {
+    "enabled": true,
+    "queue_calls": true,
+    "default_queue_enabled": true,
+    "oauth": {
+      "callback_url": "",
+      "callback_port": null,
+      "timeout_seconds": 300
+    },
+    "servers": [
+      {
+        "id": "github_copilot",
+        "enabled": false,
+        "transport": "http",
+        "url": "https://api.githubcopilot.com/mcp/",
+        "tool_prefix": "github",
+        "auth": {
+          "type": "bearer",
+          "token_env": "GITHUB_PAT_TOKEN"
+        },
+        "allowed_agent_ids": [
+          "*"
+        ],
+        "allowed_roles": [],
+        "allowed_departments": [],
+        "allowed_worker_types": [],
+        "allowed_tools": [
+          "*"
+        ],
+        "timeout_seconds": 30,
+        "queue": {
+          "enabled": true
+        },
+        "tools": []
+      },
+      {
+        "id": "cloudflare_docs",
+        "enabled": true,
+        "transport": "http",
+        "url": "https://docs.mcp.cloudflare.com/mcp",
+        "tool_prefix": "cloudflare_docs",
+        "auth": {
+          "type": "none"
+        },
+        "allowed_agent_ids": [
+          "*"
+        ],
+        "allowed_roles": [],
+        "allowed_departments": [],
+        "allowed_worker_types": [],
+        "allowed_tools": [
+          "*"
+        ],
+        "timeout_seconds": 60,
+        "queue": {
+          "enabled": true
+        },
+        "tools": []
+      }
+    ]
+  },
+  "execution": {
+    "mode": "full_access",
+    "sandbox": {
+      "provider": "anthropic_sandbox_runtime",
+      "command_prefix": [
+        "srt",
+        "--settings",
+        "{settings_path}"
+      ],
+      "settings_path": "examples/sandbox_runtime_settings.json",
+      "queue_mcp_tools": true,
+      "mcp_tool_queue_timeout_seconds": 30.0,
+      "mcp_tool_queue_excluded_tools": [
+        "enqueue_work",
+        "claim_work",
+        "complete_work",
+        "fail_work",
+        "get_work_queue",
+        "get_inbox",
+        "claim_inbox",
+        "complete_inbox",
+        "fail_inbox"
+      ],
+      "worker_extra_args": {
+        "codex": [],
+        "claude_code": [
+          "--dangerously-skip-permissions"
+        ],
+        "claude_code_interactive": []
+      }
     }
   },
   "icons": {

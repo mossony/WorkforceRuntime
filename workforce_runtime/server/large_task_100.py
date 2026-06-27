@@ -142,7 +142,7 @@ def build_large_task_100_organization(
             role=position.role,
             department=position.department,
             manager_id=manager_id,
-            worker_type="openrouter_manager" if has_reports or manager_id is None else "openrouter_worker",
+            worker_type="codex",
             model=model,
             responsibilities=_responsibilities_for(position),
             permissions=permissions,
@@ -1103,7 +1103,7 @@ Return JSON only:
       "role": string,
       "department": string,
       "manager_id": string or null,
-      "worker_type": "openrouter_manager" or "openrouter_worker",
+      "worker_type": "codex",
       "model": string,
       "permissions": [string]
     }}
@@ -1152,7 +1152,7 @@ def _normalize_designed_organization(
             permissions = list(dict.fromkeys([*permissions, REPORT_TO_HUMAN]))
         model_pool = management_models if has_reports or is_root else worker_models
         model = agent.model if agent.model in allowed_models and _model_is_configured(agent.model) else model_pool[index % len(model_pool)]
-        worker_type = "openrouter_manager" if has_reports or is_root else "openrouter_worker"
+        worker_type = "codex"
         normalized.append(
             agent.model_copy(
                 update={
@@ -1318,7 +1318,7 @@ def _organization_from_design_policy(
             role=position.role,
             department=position.department,
             manager_id=ids_by_role.get(manager_role or ""),
-            worker_type="openrouter_manager" if has_reports or is_root else "openrouter_worker",
+            worker_type="codex",
             model=model,
             responsibilities=_responsibilities_for(position),
             permissions=list(dict.fromkeys(permissions)),

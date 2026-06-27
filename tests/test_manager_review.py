@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from workforce_runtime.core import ReportContract, UsageCost
 from workforce_runtime.server.runtime import WorkforceRuntime
 
@@ -61,7 +63,21 @@ def test_register_report_creates_manager_review_task_and_accepts(tmp_path: Path)
         assert "agent_inbox_item_enqueued" in event_types
 
 
-def test_manager_review_rejects_failed_report(tmp_path: Path) -> None:
+def test_manager_review_requires_explicit_decision(tmp_path: Path) -> None:
+    with WorkforceRuntime(tmp_path / "runtime.sqlite") as runtime:
+        runtime.initialize_org(EXAMPLE_ORG)
+        task = runtime.create_task(
+            title="Fix parser",
+            objective="Fix parser and provide tests.",
+            assign_to="codex_worker",
+        )
+        runtime.register_report(make_report(task.task_id, status="failed", confidence=0.3))
+
+        with pytest.raises(ValueError, match="explicit decision"):
+            runtime.review_report("report_001", reviewer_id="engineering_manager")
+
+
+def test_manager_review_rejects_failed_report_with_explicit_decision(tmp_path: Path) -> None:
     with WorkforceRuntime(tmp_path / "runtime.sqlite") as runtime:
         runtime.initialize_org(EXAMPLE_ORG)
         task = runtime.create_task(
@@ -73,7 +89,7 @@ def test_manager_review_rejects_failed_report(tmp_path: Path) -> None:
 
         assert runtime.require_task(task.task_id).status == "assigned"
         review_task = next(candidate for candidate in runtime.list_tasks() if candidate.parent_task_id == task.task_id)
-        runtime.review_report("report_001", reviewer_id="engineering_manager")
+        runtime.review_report("report_001", reviewer_id="engineering_manager", decision="reject")
         assert runtime.require_task(task.task_id).status == "failed"
         assert runtime.require_task(review_task.task_id).status == "completed"
         decision = next(event for event in runtime.store.list_events() if event.event_type == "manager_review_reject")

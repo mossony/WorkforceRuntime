@@ -87,7 +87,7 @@ def build_large_scale_organization(
         role="Chief Executive Officer",
         department="Executive",
         manager_id=None,
-        worker_type="openrouter_manager",
+        worker_type="codex",
         model=management_model,
         responsibilities=["set large-org strategy", "enforce execution slot limits", "report scale readiness"],
         permissions=[DELEGATE_TASK, REPORT, REPORT_TO_HUMAN],
@@ -110,7 +110,7 @@ def build_large_scale_organization(
             role="VP of Delivery",
             department=f"Division {index + 1:03d}",
             manager_id="ceo",
-            worker_type="openrouter_manager",
+            worker_type="codex",
             model=management_model,
             responsibilities=["route work to managers", "watch local budget", "summarize division status"],
             permissions=[DELEGATE_TASK, REPORT],
@@ -128,7 +128,7 @@ def build_large_scale_organization(
             role="Delivery Manager",
             department=f"Delivery Pod {(index % max(vp_count, 1)) + 1:03d}",
             manager_id=vp_id,
-            worker_type="openrouter_manager",
+            worker_type="codex",
             model=management_model,
             responsibilities=["assign bounded worker tasks", "check progress", "escalate blocked work"],
             permissions=[DELEGATE_TASK, REPORT],
@@ -145,7 +145,7 @@ def build_large_scale_organization(
             role="Execution Worker",
             department=f"Execution Pool {(index % max(vp_count, 1)) + 1:03d}",
             manager_id=manager_id,
-            worker_type="openrouter_worker",
+            worker_type="codex",
             model=worker_model,
             responsibilities=["execute one assigned work packet", "emit status", "report evidence"],
             permissions=[READ_REPO, SUBMIT_ARTIFACT, REPORT],
@@ -178,7 +178,8 @@ def run_large_org_scale_demo(
         management_model=management_model,
         worker_model=worker_model,
     )
-    workers = [agent for agent in organization.agents if agent.worker_type == "openrouter_worker"]
+    manager_ids = {agent.manager_id for agent in organization.agents if agent.manager_id}
+    workers = [agent for agent in organization.agents if agent.id not in manager_ids and agent.manager_id is not None]
 
     started = time.perf_counter()
     with WorkforceRuntime(db_path) as runtime:
@@ -471,19 +472,16 @@ def run_sample_repo_fix_demo(db_path: Path, workspace: Path) -> str:
                 manager_id="engineering_manager",
             ),
         )
-        for report in runtime.store.list_reports():
-            runtime.review_report(report.report_id, reviewer_id=report.to_agent_id)
-
         reports = runtime.store.list_reports()
         artifacts = runtime.store.list_artifacts()
         events = runtime.store.list_events()
+        review_items = [item for item in runtime.store.list_agent_inbox_items(agent_id="engineering_manager") if item.kind == "report_review"]
         dashboard = render_text_dashboard(runtime.store)
         tool_task = runtime.require_task(tool_task.task_id)
 
     diff_paths = [artifact.path for artifact in artifacts if artifact.type == "git_diff"]
     test_log_paths = [artifact.path for artifact in artifacts if artifact.type == "test_log"]
     tool_reports = [report for report in reports if report.task_id == tool_task.task_id]
-    review_events = [event for event in events if event.event_type == "manager_review_decided"]
     total_tokens = sum(report.cost.tokens_used for report in reports)
 
     return "\n".join(
@@ -503,8 +501,8 @@ def run_sample_repo_fix_demo(db_path: Path, workspace: Path) -> str:
             "Worker Report:",
             f"  {tool_reports[-1].summary if tool_reports else 'No report'}",
             "",
-            "Manager Review:",
-            f"  {review_events[-1].payload if review_events else 'No manager review'}",
+            "Manager Review Inbox:",
+            f"  {review_items[-1].payload if review_items else 'No manager review inbox item'}",
             "",
             "Artifacts:",
             f"  Diff: {diff_paths[-1] if diff_paths else 'missing'}",
@@ -671,12 +669,10 @@ def run_web_research_demo(db_path: Path, workspace: Path) -> str:
                 manager_id="engineering_manager",
             ),
         )
-        for report in runtime.store.list_reports():
-            runtime.review_report(report.report_id, reviewer_id=report.to_agent_id)
-
         reports = runtime.store.list_reports()
         artifacts = runtime.store.list_artifacts()
         events = runtime.store.list_events()
+        review_items = [item for item in runtime.store.list_agent_inbox_items(agent_id="engineering_manager") if item.kind == "report_review"]
         dashboard = render_text_dashboard(runtime.store)
         replay = render_event_replay(runtime.store)
         trajectories = render_agent_trajectories(runtime.store)
@@ -686,8 +682,6 @@ def run_web_research_demo(db_path: Path, workspace: Path) -> str:
     worker_artifacts = [artifact for artifact in artifacts if artifact.task_id == final_worker_task.task_id]
     tool_events = [event for event in events if event.event_type.startswith("mcp_tool_call_")]
     output_events = [event for event in events if event.event_type in {"agent_output", "worker_output"}]
-    review_events = [event for event in events if event.event_type == "manager_review_decided"]
-
     return "\n".join(
         [
             "Workforce Runtime Demo: web-research",
@@ -708,8 +702,8 @@ def run_web_research_demo(db_path: Path, workspace: Path) -> str:
             "Final Worker Report:",
             f"  {worker_reports[-1].summary if worker_reports else 'No report'}",
             "",
-            "Manager Review:",
-            f"  {review_events[-1].payload if review_events else 'No manager review'}",
+            "Manager Review Inbox:",
+            f"  {review_items[-1].payload if review_items else 'No manager review inbox item'}",
             "",
             "Artifacts:",
             *(f"  {artifact.type}: {artifact.path}" for artifact in worker_artifacts),

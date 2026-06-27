@@ -115,9 +115,12 @@
     "token_budget": 600000,
     "management_model": "openai/gpt-oss-120b:free",
     "worker_model": "poolside/laguna-xs.2:free",
+    "decision_backend": "codex",
+    "management_worker_type": "codex",
+    "worker_worker_type": "codex",
     "include_hr": true,
     "max_management_depth": 3,
-    "use_llm": false
+    "use_llm": true
   },
   "designed_task": {
     "company_name": "Designed Task Workforce",
@@ -126,6 +129,9 @@
     "management_model": "openai/gpt-oss-120b:free",
     "worker_model": "poolside/laguna-m.1:free",
     "judge_model": "openai/gpt-oss-120b:free",
+    "decision_backend": "codex",
+    "management_worker_type": "codex",
+    "worker_worker_type": "codex",
     "use_llm": true,
     "judge": "heuristic",
     "reset": false,
@@ -194,6 +200,39 @@
       "heartbeat": 30,
       "blocked_connection_timeout": 30
     }
+  },
+  "external_mcp": {
+    "enabled": true,
+    "queue_calls": true,
+    "default_queue_enabled": true,
+    "oauth": {
+      "callback_url": "",
+      "callback_port": null,
+      "timeout_seconds": 300
+    },
+    "servers": [
+      {
+        "id": "github_copilot",
+        "enabled": false,
+        "transport": "http",
+        "url": "https://api.githubcopilot.com/mcp/",
+        "tool_prefix": "github",
+        "auth": {
+          "type": "bearer",
+          "token_env": "GITHUB_PAT_TOKEN"
+        },
+        "allowed_agent_ids": ["*"],
+        "allowed_roles": [],
+        "allowed_departments": [],
+        "allowed_worker_types": [],
+        "allowed_tools": ["*"],
+        "timeout_seconds": 30,
+        "queue": {
+          "enabled": true
+        },
+        "tools": []
+      }
+    ]
   },
   "execution": {
     "mode": "full_access",

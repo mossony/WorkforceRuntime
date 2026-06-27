@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import threading
 from pathlib import Path
@@ -12,12 +13,22 @@ import pytest
 
 from workforce_runtime.core import AgentProfile, ReportContract, UsageCost
 from workforce_runtime.dashboard.config import load_dashboard_config
-from workforce_runtime.dashboard.web_dashboard import CODEX_ICON_PATH, HTML, build_web_dashboard_state, make_web_dashboard_server
+from workforce_runtime.dashboard.web_dashboard import (
+    CODEX_ICON_PATH,
+    DASHBOARD_CONTROLLER_JS,
+    DASHBOARD_FRONTEND_DIR,
+    DASHBOARD_SHELL_HTML,
+    ELK_JS_PATH,
+    HTML,
+    build_web_dashboard_state,
+    make_web_dashboard_server,
+)
 from workforce_runtime.server.runtime import WorkforceRuntime
 from workforce_runtime.workers.steering import STEERABLE_SESSIONS
 
 
 EXAMPLE_ORG = Path("examples/simple_engineering_org/org.yaml")
+DASHBOARD_STYLES = (DASHBOARD_FRONTEND_DIR / "src" / "styles.css").read_text()
 
 
 class FakeSteerableSession:
@@ -37,26 +48,64 @@ class FakeSteerableSession:
 
 def test_web_dashboard_html_includes_claude_simple_ui() -> None:
     assert "<title>Workforce Runtime</title>" in HTML
-    assert 'id="app-shell"' in HTML
-    assert 'id="sidebar"' in HTML
-    assert 'id="status-metrics"' in HTML
-    assert 'id="pipeline-card"' in HTML
-    assert "Where should we begin?" in HTML
-    assert 'id="designed-task-goal"' in HTML
-    assert 'id="submit-label"' in HTML
-    assert "Design Org" in HTML
-    assert "New task" in HTML
-    assert "Task history" in HTML
-    assert "simple-agent-node" in HTML
-    assert "simple-agent-summary" in HTML
-    assert "renderSimpleOrg" in HTML
-    assert "body.mode-debug .simple-only" in HTML
-    assert "body.mode-simple .debug-only" in HTML
-    assert 'id="designed-task-config-json"' in HTML
-    assert 'id="designed-task-progress-detail"' in HTML
-    assert 'id="agent-detail"' in HTML
-    assert "function sendTaskCeoMessage" in HTML
-    assert "refresh().catch" in HTML
+    assert "/assets/elk.bundled.js" in HTML
+    assert "/assets/dashboard.js" in HTML
+    assert "/assets/index.css" in HTML
+    assert 'id="root"' in HTML
+    assert 'id="app-shell"' in DASHBOARD_SHELL_HTML
+    assert 'id="sidebar"' in DASHBOARD_SHELL_HTML
+    assert 'id="status-metrics"' in DASHBOARD_SHELL_HTML
+    assert 'id="pipeline-card"' in DASHBOARD_SHELL_HTML
+    assert 'id="simple-org-section"' in DASHBOARD_SHELL_HTML
+    assert 'id="simple-org-canvas"' in DASHBOARD_SHELL_HTML
+    assert "Where should we begin?" in DASHBOARD_SHELL_HTML
+    assert 'id="designed-task-goal"' in DASHBOARD_SHELL_HTML
+    assert 'placeholder="Describe the goal for your workforce..."' in DASHBOARD_SHELL_HTML
+    assert 'id="submit-label"' in DASHBOARD_SHELL_HTML
+    assert 'id="run-designed-task"' in DASHBOARD_SHELL_HTML
+    assert 'id="composer-config-panel"' in DASHBOARD_SHELL_HTML
+    assert "Design Org" in DASHBOARD_SHELL_HTML
+    assert "New task" in DASHBOARD_SHELL_HTML
+    assert "Task history" in DASHBOARD_SHELL_HTML
+    assert "input-type-badge" in DASHBOARD_SHELL_HTML
+    assert "example-chip" in DASHBOARD_SHELL_HTML
+    assert "Launch the public beta" in DASHBOARD_SHELL_HTML
+    assert "Rebuild the Q3 revenue model" in DASHBOARD_SHELL_HTML
+    assert "task-chat-mode" in DASHBOARD_STYLES
+    assert "Chat with your CEO..." in DASHBOARD_CONTROLLER_JS
+    assert "#sidebar.collapsed .sb-collapse-btn svg" in DASHBOARD_STYLES
+    assert "simple-agent-node" in DASHBOARD_STYLES
+    assert "simple-agent-summary" in DASHBOARD_STYLES
+    assert "renderSimpleOrg" in DASHBOARD_CONTROLLER_JS
+    assert "function renderSimpleTaskOrg" in DASHBOARD_CONTROLLER_JS
+    assert "function layoutSimpleOrg" in DASHBOARD_CONTROLLER_JS
+    assert "function ensureELK" in DASHBOARD_CONTROLLER_JS
+    assert "section.hidden = !selectedTaskId" in DASHBOARD_CONTROLLER_JS
+    assert "dataset.layoutEngine" in DASHBOARD_CONTROLLER_JS
+    assert "data-action=\"simple-org-fit\"" in DASHBOARD_SHELL_HTML
+    assert "data-action=\"toggle-composer-config\"" in DASHBOARD_SHELL_HTML
+    assert "body.mode-debug .simple-only" in DASHBOARD_STYLES
+    assert "body.mode-simple .debug-only" in DASHBOARD_STYLES
+    assert 'id="designed-task-config-json"' in DASHBOARD_SHELL_HTML
+    assert 'id="designed-task-progress-detail"' in DASHBOARD_SHELL_HTML
+    assert 'id="agent-detail"' in DASHBOARD_SHELL_HTML
+    assert "function sendTaskCeoMessage" in DASHBOARD_CONTROLLER_JS
+    assert "refresh().catch" in DASHBOARD_CONTROLLER_JS
+
+
+def test_web_dashboard_buttons_are_wired_to_handlers() -> None:
+    actions = sorted(set(re.findall(r'data-action="([^"]+)"', DASHBOARD_SHELL_HTML)))
+    assert actions
+    for action in actions:
+        assert f'action === "{action}"' in DASHBOARD_CONTROLLER_JS
+
+    buttons = re.findall(r"<button([^>]*)>(.*?)</button>", DASHBOARD_SHELL_HTML, flags=re.S)
+    inert_buttons = [
+        attrs
+        for attrs, _body in buttons
+        if 'data-action="' not in attrs and "onclick=" not in attrs
+    ]
+    assert inert_buttons == []
 
 
 def test_web_dashboard_state_includes_status_replay_and_output(tmp_path: Path) -> None:
@@ -371,28 +420,34 @@ def test_web_dashboard_http_endpoints(tmp_path: Path) -> None:
             codex_icon = urlopen(f"http://{host}:{port}/assets/agent-icons/codex.png", timeout=5).read()
         else:
             codex_icon = b""
+        elk_js = urlopen(f"http://{host}:{port}/assets/elk.bundled.js", timeout=5).read(256)
+        dashboard_js = urlopen(f"http://{host}:{port}/assets/dashboard.js", timeout=5).read().decode()
+        dashboard_css = urlopen(f"http://{host}:{port}/assets/index.css", timeout=5).read().decode()
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
 
     assert "<title>Workforce Runtime</title>" in html
-    assert 'id="app-shell"' in html
-    assert 'id="sidebar"' in html
-    assert 'id="status-metrics"' in html
-    assert 'id="pipeline-card"' in html
-    assert "Org Chart" in html
-    assert "Live Agent Output" in html
-    assert "agent-detail" in html
-    assert "Details" in html
-    assert "Where should we begin?" in html
-    assert "designed-task-goal" in html
-    assert "submit-label" in html
-    assert "Human Reports" in html
-    assert "Internal Manager Reports" in html
-    assert "Start Long RFC Demo" in html
-    assert "Start Real LLM Benchmark" in html
-    assert "Start Claude Steer Demo" in html
+    assert 'id="root"' in html
+    assert "/assets/elk.bundled.js" in html
+    assert "/assets/dashboard.js" in html
+    assert "/assets/index.css" in html
+    assert "Where should we begin?" in dashboard_js
+    assert "Org Chart" in dashboard_js
+    assert "Live Agent Output" in dashboard_js
+    assert "agent-detail" in dashboard_js
+    assert "Details" in dashboard_js
+    assert "designed-task-goal" in dashboard_js
+    assert "submit-label" in dashboard_js
+    assert "run-designed-task" in dashboard_js
+    assert "composer-config-panel" in dashboard_js
+    assert "Human Reports" in dashboard_js
+    assert "Internal Manager Reports" in dashboard_js
+    assert "Start Long RFC Demo" in dashboard_js
+    assert "Start Real LLM Benchmark" in dashboard_js
+    assert "Start Claude Steer Demo" in dashboard_js
+    assert "#app-shell" in dashboard_css
     assert state["company"]["name"] == "Demo Workforce"
     assert agent_detail["ok"] is True
     assert agent_detail["agent"]["system_prompt"]
@@ -414,9 +469,11 @@ def test_web_dashboard_http_endpoints(tmp_path: Path) -> None:
     assert "agents" in state
     assert "event_replay" in state
     assert events["cursor"] >= 1
-    assert events["events"][0]["event"]["event_type"] == "org_initialized"
+    assert any(item["event"]["event_type"] == "org_initialized" for item in events["events"])
     if CODEX_ICON_PATH.exists():
         assert codex_icon.startswith(b"\x89PNG")
+    assert ELK_JS_PATH.exists()
+    assert elk_js.startswith(b"(function")
 
 
 def test_web_dashboard_agent_steer_endpoint(tmp_path: Path) -> None:
@@ -512,26 +569,12 @@ def test_web_dashboard_agent_steer_queues_for_running_exec_without_live_session(
     assert queued[0].payload["message"] == "Apply this after the current exec has a session id."
 
 
-def test_web_dashboard_agent_steer_starts_idle_openrouter_chat(tmp_path: Path, monkeypatch) -> None:
+def test_web_dashboard_agent_steer_without_live_or_resumable_session_conflicts(tmp_path: Path) -> None:
     db_path = tmp_path / "runtime.sqlite"
     with WorkforceRuntime(db_path) as runtime:
         runtime.initialize_org(EXAMPLE_ORG)
-        manager = runtime.get_agent("engineering_manager")
-        assert manager is not None
-        runtime.store.save_agent(
-            manager.model_copy(update={"worker_type": "openrouter_manager", "model": "openai/gpt-oss-120b:free"})
-        )
         task = runtime.create_task(title="Idle manager chat", objective="Answer a human steering question.", assign_to="engineering_manager")
         runtime.update_task_status(task.task_id, status="completed", actor_id="engineering_manager")
-
-    class FakeRoutedLLMClient:
-        def chat(self, **kwargs):
-            on_delta = kwargs.get("on_delta")
-            if on_delta is not None:
-                on_delta("Idle manager answer.")
-            return SimpleNamespace(content="Idle manager answer.", usage={"total_tokens": 3})
-
-    monkeypatch.setattr("workforce_runtime.dashboard.web_dashboard.RoutedLLMClient", FakeRoutedLLMClient)
 
     try:
         server = make_web_dashboard_server(db_path, host="127.0.0.1", port=0)
@@ -553,30 +596,38 @@ def test_web_dashboard_agent_steer_starts_idle_openrouter_chat(tmp_path: Path, m
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        steer_response = json.loads(urlopen(steer_request, timeout=5).read().decode())
-        deadline = time.monotonic() + 5
-        event_types: list[str] = []
-        while time.monotonic() < deadline:
-            with WorkforceRuntime(db_path) as runtime:
-                event_types = [event.event_type for event in runtime.store.list_events()]
-            if "human_agent_steer_sent" in event_types:
-                break
-            time.sleep(0.05)
+        try:
+            urlopen(steer_request, timeout=5).read()
+            raise AssertionError("expected steer request to fail without a live or resumable session")
+        except HTTPError as exc:
+            assert exc.code == 409
+            steer_response = json.loads(exc.read().decode())
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
 
-    assert steer_response["ok"] is True
-    assert steer_response["status"] == "idle_chat_started"
-    assert "agent_run_started" in event_types
-    assert "agent_output" in event_types
-    assert "agent_run_finished" in event_types
-    assert "human_agent_steer_sent" in event_types
+    assert steer_response["ok"] is False
+    assert steer_response["status"] == "no_active_session"
+    with WorkforceRuntime(db_path) as runtime:
+        event_types = [event.event_type for event in runtime.store.list_events()]
+    assert "human_agent_steer_failed" in event_types
 
 
-def test_web_dashboard_can_design_start_and_filter_task_run(tmp_path: Path) -> None:
+def test_web_dashboard_can_design_start_and_filter_task_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "runtime.sqlite"
+
+    class FakeAgentInboxDispatcher:
+        def __init__(self, runtime, **_kwargs):
+            self.runtime = runtime
+
+        def run_until_idle(self, **_kwargs):
+            for task in self.runtime.store.list_tasks():
+                if task.status in {"assigned", "in_progress"}:
+                    self.runtime.update_task_status(task.task_id, status="completed", actor_id=task.assigned_to or "runtime")
+            return SimpleNamespace(claimed=1, completed=1, failed=0)
+
+    monkeypatch.setattr("workforce_runtime.dashboard.web_dashboard.AgentInboxDispatcher", FakeAgentInboxDispatcher)
 
     try:
         server = make_web_dashboard_server(db_path, host="127.0.0.1", port=0)
@@ -649,7 +700,7 @@ def test_web_dashboard_can_design_start_and_filter_task_run(tmp_path: Path) -> N
     assert all(task["task_id"] in filtered["task_filter"]["task_ids"] for task in filtered["tasks"])
     assert filtered["agents"]
     assert filtered["trace_files"]
-    assert any(item["label"] == "benchmark" for item in filtered["trace_files"])
+    assert any(item["label"] == "task" for item in filtered["trace_files"])
     assert exported["ok"] is True
     assert exported["trace"]["task_id"] == root_task_id
     assert Path(exported["path"]).exists()

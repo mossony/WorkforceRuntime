@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from workforce_runtime.config import load_runtime_config
+from workforce_runtime.mcp.external import ExternalMCPRegistry, ResolvedExternalMCPTool
 from workforce_runtime.mcp.tools.get_agent_profiles import get_agent_profiles
 from workforce_runtime.mcp.tools.get_org_context import get_org_context
 from workforce_runtime.mcp.tools.get_task_context import get_task_context
@@ -29,6 +31,7 @@ from workforce_runtime.mcp.tools.hire import hire
 from workforce_runtime.mcp.tools.get_task_dossier import get_task_dossier
 from workforce_runtime.mcp.tools.report import report
 from workforce_runtime.mcp.tools.report_to_human import report_to_human
+from workforce_runtime.mcp.tools.review_report import review_report
 from workforce_runtime.mcp.tools.request_budget import request_budget
 from workforce_runtime.mcp.tools.request_permission import request_permission
 from workforce_runtime.mcp.tools.request_tool import request_tool
@@ -45,6 +48,7 @@ ToolHandler = Callable[[WorkforceRuntime, dict[str, object]], dict[str, object]]
 TOOL_HANDLERS: dict[str, ToolHandler] = {
     "report": report,
     "report_to_human": report_to_human,
+    "review_report": review_report,
     "assign": assign,
     "check_progress": check_progress,
     "discuss": discuss,
@@ -133,6 +137,25 @@ def tool_specs() -> list[dict[str, object]]:
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     "next_action": {"type": "string"},
                     "requires_decision": {"type": "boolean"},
+                },
+            },
+        },
+        {
+            "name": "review_report",
+            "description": "Manager reviews a subordinate report and records an explicit decision.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["from_agent_id", "report_id", "decision"],
+                "properties": {
+                    "from_agent_id": {"type": "string"},
+                    "reviewer_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "report_id": {"type": "string"},
+                    "decision": {
+                        "type": "string",
+                        "enum": ["accept", "reject", "request_retry", "escalate", "request_human_review"],
+                    },
+                    "notes": {"type": "string"},
                 },
             },
         },
@@ -434,9 +457,17 @@ def tool_specs() -> list[dict[str, object]]:
 
 
 class MCPServer:
-    def __init__(self, runtime: WorkforceRuntime, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        runtime: WorkforceRuntime,
+        config: dict[str, Any] | None = None,
+        *,
+        default_actor_id: str = "",
+    ) -> None:
         self.runtime = runtime
         self.config = config or load_runtime_config()
+        self.default_actor_id = default_actor_id
+        self.external_mcp = ExternalMCPRegistry(self.config)
 
     def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
         request_id = message.get("id")
@@ -453,7 +484,11 @@ class MCPServer:
                     "serverInfo": {"name": "workforce-runtime", "version": "0.1.0"},
                 }
             elif method == "tools/list":
-                result = {"tools": tool_specs()}
+                params = message.get("params") or {}
+                actor_id = self.default_actor_id
+                if isinstance(params, dict) and params.get("actor_id"):
+                    actor_id = str(params["actor_id"])
+                result = {"tools": [*tool_specs(), *self.external_mcp.tool_specs(self.runtime, actor_id=actor_id)]}
             elif method == "tools/call":
                 params = message.get("params") or {}
                 if not isinstance(params, dict):
@@ -462,9 +497,10 @@ class MCPServer:
                 arguments = params.get("arguments") or {}
                 if not isinstance(arguments, dict):
                     raise ValueError("arguments must be an object")
-                if name not in TOOL_HANDLERS:
+                resolved_external = self.external_mcp.resolve(name)
+                if name not in TOOL_HANDLERS and resolved_external is None:
                     raise ValueError(f"unknown tool: {name}")
-                actor_id = _tool_actor_id(arguments)
+                actor_id = _tool_actor_id(arguments, default_actor_id=self.default_actor_id)
                 task_id = _tool_task_id(arguments)
                 self.runtime.record_event(
                     event_type="mcp_tool_call_started",
@@ -473,7 +509,13 @@ class MCPServer:
                     payload={"tool_name": name, **_summarize_tool_arguments(arguments)},
                 )
                 try:
-                    structured = self._execute_tool(name, arguments, actor_id=actor_id, task_id=task_id)
+                    structured = self._execute_tool(
+                        name,
+                        arguments,
+                        actor_id=actor_id,
+                        task_id=task_id,
+                        resolved_external=resolved_external,
+                    )
                 except Exception as exc:
                     self.runtime.record_event(
                         event_type="mcp_tool_call_failed",
@@ -510,7 +552,30 @@ class MCPServer:
         *,
         actor_id: str,
         task_id: str | None,
+        resolved_external: ResolvedExternalMCPTool | None = None,
     ) -> dict[str, object]:
+        if resolved_external is not None:
+            executor = lambda: self.external_mcp.execute(
+                self.runtime,
+                resolved_external,
+                arguments,
+                actor_id=actor_id,
+                task_id=task_id,
+            )
+            if not _should_queue_external_mcp_tool(
+                self.runtime,
+                self.config,
+                resolved_external,
+                actor_id=actor_id,
+            ):
+                return executor()
+            return self._execute_queued_tool(
+                name,
+                arguments,
+                actor_id=actor_id,
+                task_id=task_id,
+                executor=executor,
+            )
         if not _should_queue_mcp_tool(self.runtime, self.config, name=name, actor_id=actor_id):
             return TOOL_HANDLERS[name](self.runtime, arguments)
         return self._execute_queued_tool(name, arguments, actor_id=actor_id, task_id=task_id)
@@ -522,6 +587,7 @@ class MCPServer:
         *,
         actor_id: str,
         task_id: str | None,
+        executor: Callable[[], dict[str, object]] | None = None,
     ) -> dict[str, object]:
         work_item = self.runtime.enqueue_work_item(
             actor_id=actor_id,
@@ -559,7 +625,7 @@ class MCPServer:
             time.sleep(0.05)
 
         try:
-            structured = TOOL_HANDLERS[name](self.runtime, arguments)
+            structured = executor() if executor is not None else TOOL_HANDLERS[name](self.runtime, arguments)
         except Exception as exc:
             self.runtime.fail_work_item(work_item.work_item_id, actor_id=lease_owner, error=str(exc), retry=False)
             raise
@@ -567,10 +633,12 @@ class MCPServer:
         return structured
 
 
-def _tool_actor_id(arguments: dict[str, object]) -> str:
+def _tool_actor_id(arguments: dict[str, object], *, default_actor_id: str = "") -> str:
     for key in ("from_agent_id", "agent_id", "caller_id", "requested_by"):
         if arguments.get(key):
             return str(arguments[key])
+    if default_actor_id:
+        return default_actor_id
     return "unknown"
 
 
@@ -599,6 +667,23 @@ def _should_queue_mcp_tool(
     if name in QUEUE_CONTROL_TOOLS:
         return False
     if actor_id == "unknown" or runtime.store.get_agent(actor_id) is None:
+        return False
+    return True
+
+
+def _should_queue_external_mcp_tool(
+    runtime: WorkforceRuntime,
+    config: dict[str, Any],
+    resolved: ResolvedExternalMCPTool,
+    *,
+    actor_id: str,
+) -> bool:
+    if not resolved.server.queue_enabled:
+        return False
+    if actor_id == "unknown" or runtime.store.get_agent(actor_id) is None:
+        return False
+    external = config.get("external_mcp") if isinstance(config.get("external_mcp"), dict) else {}
+    if not bool(external.get("queue_calls", True)):
         return False
     return True
 
@@ -692,7 +777,7 @@ def _clip(text: str, limit: int = 300) -> str:
 
 def serve_stdio(db_path: str | Path, config: dict[str, Any] | None = None) -> None:
     with WorkforceRuntime(db_path) as runtime:
-        server = MCPServer(runtime, config=config)
+        server = MCPServer(runtime, config=config, default_actor_id=os.environ.get("WORKFORCE_AGENT_ID", ""))
         for line in sys.stdin:
             line = line.strip()
             if not line:
@@ -714,7 +799,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     config = load_runtime_config(args.config)
-    db_path = args.db or Path(str(config.get("runtime", {}).get("db_path") or "workforce_runtime"))
+    env_db = os.environ.get("WORKFORCE_RUNTIME_DB")
+    db_path = args.db or (Path(env_db) if env_db else Path(str(config.get("runtime", {}).get("db_path") or "workforce_runtime")))
     serve_stdio(db_path, config=config)
 
 
