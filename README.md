@@ -1,6 +1,6 @@
 # Workforce Runtime
 
-Workforce Runtime is an organization-level control plane for coordinating AI coding agents and other external workers. It gives Codex, Claude Code, generic CLI workers, and other executors a durable company structure: org chart, task contracts, manager review, MCP reporting, inbox messages, queued tool calls, budgets, permissions, artifacts, events, traces, and dashboards.
+Workforce Runtime is an organization-level control plane for coordinating AI coding agents and other external workers. It gives Codex, Claude Code, and generic CLI executors durable task contracts, reporting lines, inboxes, queues, permissions, artifacts, and execution traces.
 
 It does not replace the worker. It gives the worker a durable organization to work inside.
 
@@ -86,7 +86,7 @@ Open the dashboard at `http://127.0.0.1:8765`.
 
 ## End-To-End Demo
 
-`demo sample-repo-fix` uses `examples/mock_worker/fix_parser_worker.py`, so it does not require Codex, Claude Code, or provider credentials. The run creates a small engineering org, delegates a parser bug from human to CEO to VP to manager to worker, patches the sample repo, submits a diff and pytest log through MCP, creates a manager-review inbox item, exports traces, and ends with final status `completed`.
+`demo sample-repo-fix` uses `examples/mock_worker/fix_parser_worker.py`, so it does not require Codex, Claude Code, or provider credentials. The run creates a small engineering org, delegates a parser bug through a multi-level engineering organization, patches the sample repo, submits a diff and pytest log through MCP, creates a manager-review inbox item, exports traces, and ends with final status `completed`.
 
 To inspect the resulting trace:
 
