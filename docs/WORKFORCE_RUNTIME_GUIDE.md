@@ -1,8 +1,9 @@
 # Workforce Runtime Guide
 
 This is the single operational guide for the current Workforce Runtime branch.
-It replaces the older split notes for runtime dependencies, storage backends,
-Codex integration, and dashboard startup.
+It replaces the older split notes for quickstart, examples, MCP tools, worker
+adapters, runtime dependencies, storage backends, Codex integration, and
+dashboard startup.
 
 ## What Workforce Runtime Is
 
@@ -35,6 +36,8 @@ config files.
 ```bash
 export OPENROUTER_API_KEY=...
 export NVIDIA_API_KEY=...
+export CEREBRAS_API_KEY=...
+export GROQ_API_KEY=...
 ```
 
 ## Required Local Services
@@ -128,6 +131,11 @@ workforce-runtime --db .workforce_runtime/simple.sqlite demo simple-status
 workforce-runtime --db .workforce_runtime/web.sqlite demo web-research --workspace .workforce_runtime/demo/web-research
 workforce-runtime --db .workforce_runtime/large-org-scale.sqlite demo large-org-scale --agent-count 3000 --active-agent-limit 20
 ```
+
+The `sample-repo-fix` demo uses the deterministic mock worker at
+`examples/mock_worker/fix_parser_worker.py`; it does not require Codex or
+Claude Code. The placeholder workspaces in `examples/codex_worker_task/` and
+`examples/claude_worker_task/` are for real CLI worker runs.
 
 Inspect state:
 
@@ -377,13 +385,13 @@ dashboard service, waits for `/healthz`, and prints the dashboard URL.
 Before changing runtime behavior, run:
 
 ```bash
-pytest
+uv run pytest
 ```
 
 For dashboard-only changes:
 
 ```bash
-pytest tests/test_web_dashboard.py -q
+uv run pytest tests/test_web_dashboard.py -q
 ```
 
 For service checks:

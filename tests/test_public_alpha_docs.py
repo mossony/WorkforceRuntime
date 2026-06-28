@@ -5,11 +5,10 @@ from pathlib import Path
 
 REQUIRED_DOCS = [
     "README.md",
-    "DESIGN.md",
-    "QUICKSTART.md",
-    "MCP_TOOLS.md",
-    "WORKER_ADAPTERS.md",
-    "EXAMPLES.md",
+    "docs/WORKFORCE_RUNTIME_GUIDE.md",
+    "PRODUCT.md",
+    "DESIGN_V2.md",
+    "IMPLEMENTATION_PLAN_V2.md",
     "ROADMAP.md",
 ]
 
@@ -38,9 +37,8 @@ def test_readme_covers_public_alpha_entrypoints() -> None:
 
 
 def test_alpha_docs_reference_runnable_demo_and_dashboard() -> None:
-    quickstart = Path("QUICKSTART.md").read_text()
-    examples = Path("EXAMPLES.md").read_text()
+    guide = Path("docs/WORKFORCE_RUNTIME_GUIDE.md").read_text()
 
-    assert "workforce-runtime --db .workforce_runtime/demo.sqlite demo sample-repo-fix" in quickstart
-    assert "workforce-runtime --db .workforce_runtime/demo.sqlite dashboard" in quickstart
-    assert "examples/mock_worker/fix_parser_worker.py" in examples
+    assert "workforce-runtime --db .workforce_runtime/demo.sqlite demo sample-repo-fix" in guide
+    assert "workforce-runtime --db .workforce_runtime/demo.sqlite dashboard" in guide
+    assert "examples/mock_worker/fix_parser_worker.py" in guide

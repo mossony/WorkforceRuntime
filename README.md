@@ -11,11 +11,13 @@ harnesses; real decision-making agents run through Codex or Claude Code.
 
 [Standalone HTML animation source](docs/Workforce%20Runtime%20Animation%20%28standalone%29.html).
 
-The single current operational guide is
+This README is the project entry point, not the exhaustive manual. The single
+current operational guide is
 [docs/WORKFORCE_RUNTIME_GUIDE.md](docs/WORKFORCE_RUNTIME_GUIDE.md). Use that
 guide for installation, MySQL/RabbitMQ setup, configuration, dashboard usage,
-MCP tools, worker integration, sandboxing, Docker packaging, and verification.
-It explains what Workforce Runtime is, what it is not, and how to operate it.
+examples, MCP tools, worker integration, sandboxing, Docker packaging, and
+verification. It explains what Workforce Runtime is, what it is not, and how to
+operate it.
 
 ## Public Alpha Quickstart
 
@@ -101,6 +103,9 @@ repo files.
 ## Current Docs
 
 - [docs/WORKFORCE_RUNTIME_GUIDE.md](docs/WORKFORCE_RUNTIME_GUIDE.md): the
-  single current guide.
-- `QUICKSTART.md`, `MCP_TOOLS.md`, `WORKER_ADAPTERS.md`, `EXAMPLES.md`, and
-  `ROADMAP.md`: retained public-alpha references.
+  canonical and most complete operational guide.
+- [PRODUCT.md](PRODUCT.md): product and dashboard design principles.
+- [DESIGN_V2.md](DESIGN_V2.md) and
+  [IMPLEMENTATION_PLAN_V2.md](IMPLEMENTATION_PLAN_V2.md): long-form V2 design
+  and implementation planning records.
+- [ROADMAP.md](ROADMAP.md): public-alpha scope and next milestones.

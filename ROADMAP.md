@@ -20,20 +20,24 @@ The alpha proves the lifecycle:
 
 ## Known Limitations
 
-- No web dashboard yet.
-- No dynamic hiring or org restructuring.
-- No distributed scheduler.
+- The web dashboard is available, but dashboard UX and long-running task
+  controls are still evolving.
+- Dynamic hiring exists through runtime tools, but automated org restructuring
+  remains limited.
+- Scheduler and queue controls are still local-first and need more production
+  hardening.
 - No remote artifact store.
 - No GitHub PR automation.
 - Real Codex and Claude Code runs depend on local CLI installation and credentials.
-- Codex OpenRouter reasoning-detail continuity is provider-specific and should be verified in smoke runs.
+- Provider-specific reasoning-detail continuity should be verified in smoke
+  runs.
 
 ## Next Milestones
 
-1. Add a small scheduler that can dispatch queued tasks to matching adapters.
-2. Add a real Codex demo that runs only when `codex` and `OPENROUTER_API_KEY` are available.
-3. Add a real Claude Code demo once `claude` availability can be detected cleanly.
-4. Add richer manager review policies for retries, escalation, and human decision gates.
-5. Add GitHub issue and pull request artifacts.
-6. Add persistent run summaries for long-running work.
-7. Add a minimal web dashboard after the protocol is stable.
+1. Harden scheduler behavior for long-running worker, model, and tool queues.
+2. Add credential-aware Codex and Claude Code smoke demos.
+3. Add richer manager review policies for retries, escalation, and human decision gates.
+4. Add GitHub issue and pull request artifacts.
+5. Add remote artifact storage.
+6. Improve persistent run summaries for long-running work.
+7. Expand dashboard controls for org changes and task steering.

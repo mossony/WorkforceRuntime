@@ -31,7 +31,7 @@ Create repository structure:
 ```text
 workforce-runtime/
   README.md
-  DESIGN.md
+  DESIGN_V2.md
   pyproject.toml
   workforce_runtime/
     __init__.py
@@ -911,11 +911,10 @@ Prepare project for open-source alpha.
 ## Required Docs
 
 * README.md
-* DESIGN.md
-* QUICKSTART.md
-* MCP_TOOLS.md
-* WORKER_ADAPTERS.md
-* EXAMPLES.md
+* docs/WORKFORCE_RUNTIME_GUIDE.md
+* PRODUCT.md
+* DESIGN_V2.md
+* IMPLEMENTATION_PLAN_V2.md
 * ROADMAP.md
 
 ## README Must Explain
