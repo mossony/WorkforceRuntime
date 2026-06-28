@@ -12573,6 +12573,7 @@ const dashboardShell = `<div id="app-shell">
           </div>
           <div class="input-footer">
             <div class="input-footer-left">
+              <span class="input-type-badge" id="input-type-badge" hidden></span>
               <span id="input-char-count"></span>
             </div>
             <button id="design-task-config" data-action="design-task-config">
@@ -12586,8 +12587,8 @@ const dashboardShell = `<div id="app-shell">
             <div class="composer-config-grid">
               <label>Headcount<input id="designed-task-headcount" type="number" min="3" value="6"></label>
               <label>Token budget<input id="designed-task-token-budget" type="number" min="0" value="600000"></label>
-              <label>Manager model<input id="designed-task-management-model" value="openai/gpt-oss-120b:free"></label>
-              <label>Worker model<input id="designed-task-worker-model" value="poolside/laguna-m.1:free"></label>
+              <label>Manager model<input id="designed-task-management-model" value="gpt-oss-120b"></label>
+              <label>Worker model<input id="designed-task-worker-model" value="gpt-oss-120b"></label>
             </div>
             <div class="composer-config-actions">
               <div class="muted">These values apply to the next organization design. Full JSON remains available in Debug mode.</div>
@@ -14321,8 +14322,8 @@ function initializeDashboard() {
       goal,
       headcount_limit: Number(document.getElementById("designed-task-headcount").value || runtimeConfig?.designed_task?.headcount_limit || 6),
       token_budget: Number(document.getElementById("designed-task-token-budget").value || runtimeConfig?.designed_task?.token_budget || 6e5),
-      management_model: document.getElementById("designed-task-management-model").value.trim() || runtimeConfig?.designed_task?.management_model || "openai/gpt-oss-120b:free",
-      worker_model: document.getElementById("designed-task-worker-model").value.trim() || runtimeConfig?.designed_task?.worker_model || "poolside/laguna-m.1:free",
+      management_model: document.getElementById("designed-task-management-model").value.trim() || runtimeConfig?.designed_task?.management_model || "gpt-oss-120b",
+      worker_model: document.getElementById("designed-task-worker-model").value.trim() || runtimeConfig?.designed_task?.worker_model || "gpt-oss-120b",
       decision_backend: runtimeConfig?.designed_task?.decision_backend || "codex",
       management_worker_type: runtimeConfig?.designed_task?.management_worker_type || "codex",
       worker_worker_type: runtimeConfig?.designed_task?.worker_worker_type || "codex",

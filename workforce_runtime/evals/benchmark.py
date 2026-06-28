@@ -39,9 +39,9 @@ class BenchmarkCase(BaseModel):
     expected_artifacts: list[str] = Field(default_factory=list)
     headcount_limit: int = Field(default=6, ge=3)
     token_budget: int = Field(default=600000, ge=0)
-    management_model: str = "openai/gpt-oss-120b:free"
-    worker_model: str = "poolside/laguna-xs.2:free"
-    judge_model: str = "openai/gpt-oss-120b:free"
+    management_model: str = "gpt-oss-120b"
+    worker_model: str = "gpt-oss-120b"
+    judge_model: str = "gpt-oss-120b"
 
 
 class BenchmarkScore(BaseModel):

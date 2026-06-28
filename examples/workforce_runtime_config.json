@@ -33,7 +33,47 @@
     "stream": false,
     "response_format_enabled": false
   },
+  "cerebras": {
+    "base_url": "https://api.cerebras.ai",
+    "api_key_env": "CEREBRAS_API_KEY",
+    "timeout_seconds": 120,
+    "reasoning_enabled": true,
+    "reasoning_effort": "medium",
+    "stream": false,
+    "response_format_enabled": true
+  },
+  "groq": {
+    "base_url": "https://api.groq.com",
+    "api_key_env": "GROQ_API_KEY",
+    "timeout_seconds": 120,
+    "reasoning_enabled": true,
+    "reasoning_effort": "medium",
+    "stream": false,
+    "response_format_enabled": true
+  },
   "models": {
+    "gpt-oss-120b": {
+      "provider": "cerebras",
+      "context_window_tokens": 131072,
+      "max_output_tokens": 65536,
+      "supports_reasoning": true,
+      "requires_reasoning": true,
+      "reasoning_effort": "medium",
+      "supports_tools": false,
+      "supports_response_format": true,
+      "source": "https://inference-docs.cerebras.ai/"
+    },
+    "openai/gpt-oss-120b": {
+      "provider": "groq",
+      "context_window_tokens": 131072,
+      "max_output_tokens": 65536,
+      "supports_reasoning": true,
+      "requires_reasoning": true,
+      "reasoning_effort": "medium",
+      "supports_tools": true,
+      "supports_response_format": true,
+      "source": "https://console.groq.com/docs/model/openai/gpt-oss-120b"
+    },
     "openai/gpt-oss-120b:free": {
       "provider": "openrouter",
       "context_window_tokens": 131072,
@@ -113,8 +153,8 @@
     "company_name": "Designed Workforce",
     "headcount_limit": 6,
     "token_budget": 600000,
-    "management_model": "openai/gpt-oss-120b:free",
-    "worker_model": "poolside/laguna-xs.2:free",
+    "management_model": "gpt-oss-120b",
+    "worker_model": "gpt-oss-120b",
     "decision_backend": "codex",
     "management_worker_type": "codex",
     "worker_worker_type": "codex",
@@ -126,9 +166,9 @@
     "company_name": "Designed Task Workforce",
     "headcount_limit": 6,
     "token_budget": 600000,
-    "management_model": "openai/gpt-oss-120b:free",
-    "worker_model": "poolside/laguna-m.1:free",
-    "judge_model": "openai/gpt-oss-120b:free",
+    "management_model": "gpt-oss-120b",
+    "worker_model": "gpt-oss-120b",
+    "judge_model": "gpt-oss-120b",
     "decision_backend": "codex",
     "management_worker_type": "codex",
     "worker_worker_type": "codex",
@@ -167,11 +207,12 @@
     "max_chars": 140,
     "active_window_seconds": 120,
     "llm": {
-      "provider": "openrouter",
-      "base_url": "https://openrouter.ai/api/v1/chat/completions",
-      "model": "openai/gpt-oss-120b:free",
-      "api_key_env": "OPENROUTER_API_KEY",
+      "provider": "cerebras",
+      "base_url": "https://api.cerebras.ai",
+      "model": "gpt-oss-120b",
+      "api_key_env": "CEREBRAS_API_KEY",
       "reasoning_enabled": true,
+      "reasoning_effort": "medium",
       "stream": false
     }
   },
@@ -328,8 +369,8 @@
       "workspace": ".workforce_runtime/demo/large-org-scale",
       "agent_count": 3000,
       "active_agent_limit": 20,
-      "management_model": "openai/gpt-oss-120b:free",
-      "worker_model": "poolside/laguna-m.1:free"
+      "management_model": "gpt-oss-120b",
+      "worker_model": "gpt-oss-120b"
     },
     "large_task_100": {
       "workspace": ".workforce_runtime/demo/large-task-100",
@@ -337,12 +378,16 @@
       "agent_count": 100,
       "active_agent_limit": 25,
       "management_models": [
+        "gpt-oss-120b",
+        "openai/gpt-oss-120b",
         "openai/gpt-oss-120b:free",
         "openrouter/owl-alpha",
         "nvidia/nemotron-3-ultra-550b-a55b:free",
         "nvidia/nemotron-3-super-120b-a12b:free"
       ],
       "worker_models": [
+        "gpt-oss-120b",
+        "openai/gpt-oss-120b",
         "poolside/laguna-m.1:free",
         "cohere/north-mini-code:free",
         "openrouter/owl-alpha",
@@ -378,7 +423,7 @@
     },
     "swe_bench": {
       "dataset": "SWE-bench/SWE-bench_Lite",
-      "model": "poolside/laguna-m.1:free",
+      "model": "gpt-oss-120b",
       "max_tokens": 12000,
       "test_timeout_seconds": 600,
       "setup_timeout_seconds": 900

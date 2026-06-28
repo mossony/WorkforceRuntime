@@ -15,7 +15,7 @@ from workforce_runtime.evals.benchmark import BenchmarkCase
 from workforce_runtime.llm import OpenRouterClient, extract_json_object
 
 
-DEFAULT_SWE_BENCH_MODEL = "poolside/laguna-m.1:free"
+DEFAULT_SWE_BENCH_MODEL = "gpt-oss-120b"
 DEFAULT_SWE_BENCH_DATASET = "SWE-bench/SWE-bench_Lite"
 
 
@@ -140,9 +140,9 @@ def build_swe_bench_comparison_cases(
             "A patch artifact and test log are produced.",
         ],
         "expected_artifacts": ["patch", "test_log"],
-        "management_model": "openai/gpt-oss-120b:free",
+        "management_model": "gpt-oss-120b",
         "worker_model": model,
-        "judge_model": "openai/gpt-oss-120b:free",
+        "judge_model": "gpt-oss-120b",
     }
     test_context = _swe_test_context(instance)
     return {

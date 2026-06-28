@@ -93,6 +93,7 @@
           </div>
           <div class="input-footer">
             <div class="input-footer-left">
+              <span class="input-type-badge" id="input-type-badge" hidden></span>
               <span id="input-char-count"></span>
             </div>
             <button id="design-task-config" data-action="design-task-config">
@@ -106,8 +107,8 @@
             <div class="composer-config-grid">
               <label>Headcount<input id="designed-task-headcount" type="number" min="3" value="6"></label>
               <label>Token budget<input id="designed-task-token-budget" type="number" min="0" value="600000"></label>
-              <label>Manager model<input id="designed-task-management-model" value="openai/gpt-oss-120b:free"></label>
-              <label>Worker model<input id="designed-task-worker-model" value="poolside/laguna-m.1:free"></label>
+              <label>Manager model<input id="designed-task-management-model" value="gpt-oss-120b"></label>
+              <label>Worker model<input id="designed-task-worker-model" value="gpt-oss-120b"></label>
             </div>
             <div class="composer-config-actions">
               <div class="muted">These values apply to the next organization design. Full JSON remains available in Debug mode.</div>

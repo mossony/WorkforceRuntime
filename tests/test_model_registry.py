@@ -14,6 +14,10 @@ from workforce_runtime.core import AgentProfile, Company, generate_system_prompt
 
 
 def test_default_model_registry_knows_openrouter_context_windows() -> None:
+    assert model_capabilities("gpt-oss-120b")["provider"] == "cerebras"
+    assert model_capabilities("gpt-oss-120b")["reasoning_effort"] == "medium"
+    assert model_capabilities("openai/gpt-oss-120b")["provider"] == "groq"
+    assert model_capabilities("openai/gpt-oss-120b")["reasoning_effort"] == "medium"
     assert model_capabilities("openai/gpt-oss-120b:free")["context_window_tokens"] == 131072
     assert model_capabilities("poolside/laguna-m.1:free")["context_window_tokens"] == 262144
     assert model_capabilities("poolside/laguna-xs.2:free")["max_output_tokens"] == 32768
@@ -90,5 +94,5 @@ def test_model_failover_detects_unavailable_model_errors_and_selects_role_fallba
 
     assert is_unavailable_model_error("NVIDIA stream failed: DEGRADED function cannot be invoked")
     assert is_unavailable_model_error("model not found")
-    assert choose_agent_replacement_model(manager, failed_model=manager.model) == "openai/gpt-oss-120b:free"
-    assert choose_agent_replacement_model(worker, failed_model=worker.model) == "poolside/laguna-m.1:free"
+    assert choose_agent_replacement_model(manager, failed_model=manager.model) == "gpt-oss-120b"
+    assert choose_agent_replacement_model(worker, failed_model=worker.model) == "gpt-oss-120b"

@@ -58,7 +58,7 @@ def choose_agent_replacement_model(
         large_task = dict(config.get("demos", {}).get("large_task_100") or {})
         candidates = [str(model) for model in large_task.get("management_models" if is_management_agent(agent) else "worker_models") or []]
     if not candidates:
-        candidates = ["openai/gpt-oss-120b:free"] if is_management_agent(agent) else ["poolside/laguna-m.1:free"]
+        candidates = ["gpt-oss-120b"] if is_management_agent(agent) else ["gpt-oss-120b"]
 
     for model in candidates:
         if not model or model == failed_model:

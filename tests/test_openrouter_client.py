@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 import workforce_runtime.llm.openrouter as openrouter
-from workforce_runtime.llm import NvidiaClient, OpenRouterClient, extract_json_object
+from workforce_runtime.llm import CerebrasClient, GroqClient, NvidiaClient, OpenRouterClient, RoutedLLMClient, extract_json_object
 
 
 def test_extract_json_object_handles_inline_fenced_json() -> None:
@@ -100,6 +101,100 @@ def test_nvidia_client_uses_provider_defaults(monkeypatch: pytest.MonkeyPatch) -
     assert captured["headers"]["Authorization"] == "Bearer test"
     assert "HTTP-Referer" not in captured["headers"]
     assert "X-Title" not in captured["headers"]
+
+
+def test_cerebras_client_uses_sdk_reasoning_effort() -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs: object) -> object:
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok", reasoning="hidden"))],
+                usage=SimpleNamespace(total_tokens=3),
+            )
+
+    sdk_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    client = CerebrasClient(api_key="test", sdk_client=sdk_client, timeout_seconds=5)
+    response = client.chat(
+        model="gpt-oss-120b",
+        messages=[{"role": "user", "content": "hello"}],
+        max_tokens=64,
+        reasoning=False,
+        response_format={"type": "json_object"},
+    )
+
+    assert response.content == "ok"
+    assert captured["model"] == "gpt-oss-120b"
+    assert captured["max_tokens"] == 64
+    assert captured["reasoning_effort"] == "medium"
+    assert "reasoning" not in captured
+    assert captured["response_format"] == {"type": "json_object"}
+
+
+def test_groq_client_uses_sdk_reasoning_effort() -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs: object) -> object:
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok", reasoning="hidden"))],
+                usage=SimpleNamespace(total_tokens=3),
+            )
+
+    sdk_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    client = GroqClient(api_key="test", sdk_client=sdk_client, timeout_seconds=5)
+    response = client.chat(
+        model="openai/gpt-oss-120b",
+        messages=[{"role": "user", "content": "hello"}],
+        max_tokens=64,
+        reasoning=False,
+        response_format={"type": "json_object"},
+    )
+
+    assert response.content == "ok"
+    assert captured["model"] == "openai/gpt-oss-120b"
+    assert captured["max_tokens"] == 64
+    assert captured["reasoning_effort"] == "medium"
+    assert "reasoning" not in captured
+    assert captured["response_format"] == {"type": "json_object"}
+
+
+def test_routed_client_selects_cerebras_provider() -> None:
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def is_configured(self) -> bool:
+            return True
+
+        def chat(self, *, model: str, **kwargs: object) -> object:
+            captured["model"] = model
+            captured["kwargs"] = kwargs
+            return "ok"
+
+    client = RoutedLLMClient(clients={"cerebras": FakeClient()})
+
+    assert client.chat(model="gpt-oss-120b", messages=[]) == "ok"
+    assert captured["model"] == "gpt-oss-120b"
+
+
+def test_routed_client_selects_groq_provider() -> None:
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def is_configured(self) -> bool:
+            return True
+
+        def chat(self, *, model: str, **kwargs: object) -> object:
+            captured["model"] = model
+            captured["kwargs"] = kwargs
+            return "ok"
+
+    client = RoutedLLMClient(clients={"groq": FakeClient()})
+
+    assert client.chat(model="openai/gpt-oss-120b", messages=[]) == "ok"
+    assert captured["model"] == "openai/gpt-oss-120b"
 
 
 def test_openrouter_client_enables_required_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -81,8 +81,8 @@ def test_simple_status_demo_shows_model_routing_progress_and_replay(tmp_path: Pa
     output = run_simple_status_demo(db_path, workspace)
 
     assert "Workforce Runtime Demo: simple-status" in output
-    assert "Managers: openai/gpt-oss-120b:free" in output
-    assert "Terminal worker: poolside/laguna-xs.2:free" in output
+    assert "Managers: gpt-oss-120b" in output
+    assert "Terminal worker: gpt-oss-120b" in output
     assert "Human -> CEO -> Product Manager -> Laguna Worker" in output
     assert "Progress Check:" in output
     assert "Created concise launch note artifact." in output

@@ -25,8 +25,8 @@ from workforce_runtime.core.permissions import (
 from workforce_runtime.llm import OpenRouterClient, extract_json_object
 
 
-DEFAULT_MANAGEMENT_MODEL = "openai/gpt-oss-120b:free"
-DEFAULT_WORKER_MODEL = "poolside/laguna-xs.2:free"
+DEFAULT_MANAGEMENT_MODEL = "gpt-oss-120b"
+DEFAULT_WORKER_MODEL = "gpt-oss-120b"
 DEFAULT_DECISION_BACKEND = "codex"
 DEFAULT_MANAGEMENT_WORKER_TYPE = "codex"
 DEFAULT_WORKER_WORKER_TYPE = "codex"

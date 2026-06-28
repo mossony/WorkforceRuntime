@@ -8,6 +8,28 @@ from typing import Any
 
 DEFAULT_MODEL_REGISTRY: dict[str, Any] = {
     "models": {
+        "gpt-oss-120b": {
+            "provider": "cerebras",
+            "context_window_tokens": 131072,
+            "max_output_tokens": 65536,
+            "supports_reasoning": True,
+            "requires_reasoning": True,
+            "reasoning_effort": "medium",
+            "supports_tools": False,
+            "supports_response_format": True,
+            "source": "https://inference-docs.cerebras.ai/",
+        },
+        "openai/gpt-oss-120b": {
+            "provider": "groq",
+            "context_window_tokens": 131072,
+            "max_output_tokens": 65536,
+            "supports_reasoning": True,
+            "requires_reasoning": True,
+            "reasoning_effort": "medium",
+            "supports_tools": True,
+            "supports_response_format": True,
+            "source": "https://console.groq.com/docs/model/openai/gpt-oss-120b",
+        },
         "openai/gpt-oss-120b:free": {
             "provider": "openrouter",
             "context_window_tokens": 131072,

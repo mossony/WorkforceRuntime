@@ -76,10 +76,10 @@ def test_org_designer_fallback_creates_budgeted_management_chain() -> None:
 
     agents = {agent.id: agent for agent in organization.agents}
     assert organization.company.mission.startswith("Research a public RFC")
-    assert agents["ceo"].model == "openai/gpt-oss-120b:free"
+    assert agents["ceo"].model == "gpt-oss-120b"
     assert agents["ceo"].worker_type == "codex"
     assert "report_to_human" in agents["ceo"].permissions
-    assert agents["primary_worker"].model == "poolside/laguna-xs.2:free"
+    assert agents["primary_worker"].model == "gpt-oss-120b"
     assert agents["primary_worker"].worker_type == "codex"
     assert "submit_artifact" in agents["primary_worker"].permissions
     assert agents["primary_worker"].system_prompt

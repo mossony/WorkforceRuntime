@@ -866,7 +866,7 @@ def test_dashboard_config_json_merges_defaults(tmp_path: Path) -> None:
     config = load_dashboard_config(config_path)
 
     assert config["summaries"]["max_chars"] == 64
-    assert config["summaries"]["llm"]["model"] == "openai/gpt-oss-120b:free"
+    assert config["summaries"]["llm"]["model"] == "gpt-oss-120b"
     assert config["queue"]["max_active_agents"] == 20
     assert config["icons"]["poolside"]["label"] == "Laguna"
     assert config["dashboard"]["max_visible_agents"] == 80

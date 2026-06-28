@@ -1,6 +1,8 @@
 """LLM provider clients used by runtime orchestration."""
 
 from workforce_runtime.llm.openrouter import (
+    CerebrasClient,
+    GroqClient,
     NvidiaClient,
     OpenAICompatibleClient,
     OpenAICompatibleResponse,
@@ -11,6 +13,8 @@ from workforce_runtime.llm.openrouter import (
 )
 
 __all__ = [
+    "CerebrasClient",
+    "GroqClient",
     "NvidiaClient",
     "OpenAICompatibleClient",
     "OpenAICompatibleResponse",

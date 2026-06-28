@@ -163,15 +163,15 @@ def test_runtime_auto_replaces_unavailable_agent_model_and_prompt(tmp_path: Path
         )
 
         assert updated is not None
-        assert updated.model == "openai/gpt-oss-120b:free"
+        assert updated.model == "gpt-oss-120b"
         stored = runtime.get_agent("engineering_manager")
         assert stored is not None
-        assert stored.model == "openai/gpt-oss-120b:free"
-        assert "Assigned model: openai/gpt-oss-120b:free." in stored.system_prompt
+        assert stored.model == "gpt-oss-120b"
+        assert "Assigned model: gpt-oss-120b." in stored.system_prompt
         assert "deepseek-ai/deepseek-v4-pro" not in stored.system_prompt
         events = [event for event in runtime.store.list_events() if event.event_type == "agent_model_auto_replaced"]
         assert events[-1].payload["old_model"] == "deepseek-ai/deepseek-v4-pro"
-        assert events[-1].payload["new_model"] == "openai/gpt-oss-120b:free"
+        assert events[-1].payload["new_model"] == "gpt-oss-120b"
 
 
 def test_runtime_exports_complete_task_trace_snapshot(tmp_path: Path) -> None:

@@ -22,7 +22,7 @@
     "llm": {
       "provider": "openrouter",
       "base_url": "https://openrouter.ai/api/v1/chat/completions",
-      "model": "openai/gpt-oss-120b:free",
+      "model": "gpt-oss-120b",
       "api_key_env": "OPENROUTER_API_KEY",
       "reasoning_enabled": true,
       "stream": false

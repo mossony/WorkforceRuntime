@@ -288,8 +288,8 @@ def main(argv: list[str] | None = None) -> None:
             company_name=args.company_name or str(org_defaults.get("company_name") or "Designed Workforce"),
             headcount_limit=args.headcount_limit if args.headcount_limit is not None else int(org_defaults.get("headcount_limit") or 6),
             token_budget=args.token_budget if args.token_budget is not None else int(org_defaults.get("token_budget") or 600000),
-            management_model=args.management_model or str(org_defaults.get("management_model") or "openai/gpt-oss-120b:free"),
-            worker_model=args.worker_model or str(org_defaults.get("worker_model") or "poolside/laguna-xs.2:free"),
+            management_model=args.management_model or str(org_defaults.get("management_model") or "gpt-oss-120b"),
+            worker_model=args.worker_model or str(org_defaults.get("worker_model") or "gpt-oss-120b"),
             decision_backend=args.decision_backend or str(org_defaults.get("decision_backend") or "codex"),
             management_worker_type=args.management_worker_type or str(org_defaults.get("management_worker_type") or "codex"),
             worker_worker_type=args.worker_worker_type or str(org_defaults.get("worker_worker_type") or "codex"),
@@ -373,8 +373,8 @@ def main(argv: list[str] | None = None) -> None:
                     if args.active_agent_limit is not None
                     else int(large_defaults.get("active_agent_limit") or 20)
                 ),
-                management_model=str(large_defaults.get("management_model") or "openai/gpt-oss-120b:free"),
-                worker_model=str(large_defaults.get("worker_model") or "poolside/laguna-m.1:free"),
+                management_model=str(large_defaults.get("management_model") or "gpt-oss-120b"),
+                worker_model=str(large_defaults.get("worker_model") or "gpt-oss-120b"),
             )
         )
         return
@@ -495,7 +495,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "benchmark" and args.benchmark_command == "swe-bench-plan":
         instance = load_swe_bench_instance(args.instance)
-        cases = build_swe_bench_comparison_cases(instance, model=args.model or str(swe_defaults.get("model") or "poolside/laguna-m.1:free"))
+        cases = build_swe_bench_comparison_cases(instance, model=args.model or str(swe_defaults.get("model") or "gpt-oss-120b"))
         args.out_dir.mkdir(parents=True, exist_ok=True)
         written: dict[str, str] = {}
         for name, case in cases.items():
@@ -516,7 +516,7 @@ def main(argv: list[str] | None = None) -> None:
             run_swe_bench_instance(
                 instance,
                 workspace=args.workspace,
-                model=args.model or str(swe_defaults.get("model") or "poolside/laguna-m.1:free"),
+                model=args.model or str(swe_defaults.get("model") or "gpt-oss-120b"),
                 max_tokens=args.max_tokens if args.max_tokens is not None else int(swe_defaults.get("max_tokens") or 6000),
                 test_timeout_seconds=args.test_timeout if args.test_timeout is not None else int(swe_defaults.get("test_timeout_seconds") or 600),
                 setup_timeout_seconds=args.setup_timeout if args.setup_timeout is not None else int(swe_defaults.get("setup_timeout_seconds") or 900),
@@ -527,7 +527,7 @@ def main(argv: list[str] | None = None) -> None:
             json.dumps(
                 {
                     "ok": True,
-                    "model": args.model or str(swe_defaults.get("model") or "poolside/laguna-m.1:free"),
+                    "model": args.model or str(swe_defaults.get("model") or "gpt-oss-120b"),
                     "resolved_count": sum(1 for result in results if result.resolved),
                     "total": len(results),
                     "results": [result.model_dump(mode="json") for result in results],

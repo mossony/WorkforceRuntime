@@ -26,12 +26,16 @@ from workforce_runtime.v2.v1_bridge import analyze_v1_runtime
 
 DEFAULT_PLAN_PATH = Path("examples/Large_Task_100_v0.md")
 DEFAULT_MANAGEMENT_MODELS = [
+    "gpt-oss-120b",
+    "openai/gpt-oss-120b",
     "openai/gpt-oss-120b:free",
     "openrouter/owl-alpha",
     "nvidia/nemotron-3-ultra-550b-a55b:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
 ]
 DEFAULT_WORKER_MODELS = [
+    "gpt-oss-120b",
+    "openai/gpt-oss-120b",
     "poolside/laguna-m.1:free",
     "cohere/north-mini-code:free",
     "openrouter/owl-alpha",
@@ -39,6 +43,8 @@ DEFAULT_WORKER_MODELS = [
     "openai/gpt-oss-20b:free",
 ]
 DEFAULT_DESIGN_MODELS = [
+    "gpt-oss-120b",
+    "openai/gpt-oss-120b",
     "openrouter/owl-alpha",
     "nvidia/nemotron-3-ultra-550b-a55b:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
@@ -1624,7 +1630,7 @@ def _run_agent_json_with_model_failover(
     errors: list[dict[str, str]] = []
     candidates = [model for model in model_candidates if _model_is_configured(model)]
     if not candidates:
-        candidates = model_candidates or ["openai/gpt-oss-120b:free"]
+        candidates = model_candidates or ["gpt-oss-120b"]
     index = 0
     while index < len(candidates):
         model = candidates[index]

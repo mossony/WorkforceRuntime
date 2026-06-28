@@ -21,7 +21,7 @@
   ],
   "headcount_limit": 6,
   "token_budget": 600000,
-  "management_model": "openai/gpt-oss-120b:free",
-  "worker_model": "poolside/laguna-xs.2:free",
-  "judge_model": "openai/gpt-oss-120b:free"
+  "management_model": "gpt-oss-120b",
+  "worker_model": "gpt-oss-120b",
+  "judge_model": "gpt-oss-120b"
 }

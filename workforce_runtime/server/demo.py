@@ -34,8 +34,8 @@ WEB_RESEARCH_WORKER = Path("examples/mock_worker/web_research_worker.py").resolv
 def build_large_scale_organization(
     *,
     agent_count: int = 3000,
-    management_model: str = "openai/gpt-oss-120b:free",
-    worker_model: str = "poolside/laguna-m.1:free",
+    management_model: str = "gpt-oss-120b",
+    worker_model: str = "gpt-oss-120b",
 ) -> Organization:
     """Build a deterministic large org for runtime/dashboard scale smoke tests."""
     if agent_count < 3:
@@ -161,8 +161,8 @@ def run_large_org_scale_demo(
     *,
     agent_count: int = 3000,
     active_agent_limit: int = 20,
-    management_model: str = "openai/gpt-oss-120b:free",
-    worker_model: str = "poolside/laguna-m.1:free",
+    management_model: str = "gpt-oss-120b",
+    worker_model: str = "gpt-oss-120b",
 ) -> str:
     if agent_count < 3:
         raise ValueError("agent_count must be at least 3")
@@ -842,8 +842,8 @@ def run_simple_status_demo(db_path: Path, workspace: Path) -> str:
             f"Database: {db_path}",
             "",
             "Model Routing:",
-            "  Managers: openai/gpt-oss-120b:free",
-            "  Terminal worker: poolside/laguna-xs.2:free",
+            "  Managers: gpt-oss-120b",
+            "  Terminal worker: gpt-oss-120b",
             "",
             "Task Chain:",
             "  Human -> CEO -> Product Manager -> Laguna Worker",

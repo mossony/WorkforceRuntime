@@ -778,8 +778,8 @@ def make_web_dashboard_server(
             return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "goal is required"}
         headcount_limit = _payload_int(payload, "headcount_limit", int(designed_defaults.get("headcount_limit") or 6))
         token_budget = _payload_int(payload, "token_budget", int(designed_defaults.get("token_budget") or 600000))
-        management_model = str(payload.get("management_model") or designed_defaults.get("management_model") or "openai/gpt-oss-120b:free")
-        worker_model = str(payload.get("worker_model") or designed_defaults.get("worker_model") or "poolside/laguna-m.1:free")
+        management_model = str(payload.get("management_model") or designed_defaults.get("management_model") or "gpt-oss-120b")
+        worker_model = str(payload.get("worker_model") or designed_defaults.get("worker_model") or "gpt-oss-120b")
         decision_backend = str(payload.get("decision_backend") or designed_defaults.get("decision_backend") or "codex")
         management_worker_type = str(payload.get("management_worker_type") or designed_defaults.get("management_worker_type") or "codex")
         worker_worker_type = str(payload.get("worker_worker_type") or designed_defaults.get("worker_worker_type") or "codex")
