@@ -12508,6 +12508,13 @@ const dashboardShell = `<div id="app-shell">
         <span>Skills</span>
       </button>
     </div>
+    <button class="sb-inbox-btn" id="sb-inbox-btn" data-action="scroll-clarifications" hidden>
+      <span class="sb-inbox-left">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 4.5 8 9l6-4.5M2.5 3.5h11a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        <span class="sb-inbox-text">Needs your answer</span>
+      </span>
+      <span class="sb-inbox-badge" id="sb-inbox-badge">0</span>
+    </button>
     <div class="sb-search-wrap">
       <div class="sb-search">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="flex:0 0 auto;color:#8a867f;"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
@@ -12635,6 +12642,21 @@ const dashboardShell = `<div id="app-shell">
             </div>
           </div>
         </section>
+
+        <!-- CLARIFICATIONS (awaiting human) -->
+        <div id="home-clarifications-section" class="home-main-block" hidden>
+          <div class="reports-hdr">
+            <div class="reports-hdr-left">
+              <span class="clr-label">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M5.5 6a2.5 2.5 0 1 1 3.4 2.3c-.6.3-.9.7-.9 1.3v.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M8 12.4v.01" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+                Needs your answer
+              </span>
+              <span id="clarifications-count" class="clr-count">0</span>
+            </div>
+            <span class="reports-from">Escalated to you because no manager could resolve it.</span>
+          </div>
+          <div id="home-clarifications"></div>
+        </div>
 
         <!-- HUMAN REPORTS -->
         <div id="home-reports-section" class="home-main-block">
@@ -15073,6 +15095,110 @@ function initializeDashboard() {
       refresh().catch((err) => console.error(err));
     }, delay);
   }
+  let lastClarifications = [];
+  function clrInitials(id) {
+    const s = String(id || "").replace(/[_-]+/g, " ").trim();
+    const parts = s.split(/\s+/).filter(Boolean);
+    if (!parts.length) return "?";
+    return (parts.length === 1 ? parts[0].slice(0, 2) : parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  }
+  function renderClarificationChain(chain) {
+    const nodes = chain || [];
+    const arrow = `<span class="clr-arrow"><svg width="18" height="10" viewBox="0 0 18 10" fill="none"><path d="M1 5h15M12 1.5 16.5 5 12 8.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`;
+    return nodes.map((id, i) => {
+      const isHuman = id === "human";
+      const cls = isHuman ? "human" : i === 0 ? "asker" : "";
+      const label = isHuman ? "You (human)" : id;
+      const ava = isHuman ? "★" : clrInitials(id);
+      const node = `<span class="clr-node ${cls}"><span class="clr-node-ava">${esc(ava)}</span>${esc(label)}</span>`;
+      return node + (i < nodes.length - 1 ? arrow : "");
+    }).join("");
+  }
+  function renderClarificationCard(c) {
+    const id = String(c.clarification_id || "");
+    const asker = c.asker_agent_id || "?";
+    const ts = c.created_at ? new Date(c.created_at).toLocaleString() : "";
+    const hops = Math.max(0, (c.chain || []).length - 1);
+    return `
+      <div class="clr-card" data-clr-id="${esc(id)}">
+        <div class="clr-head">
+          <div class="clr-q-wrap">
+            <div class="clr-q-label">Question</div>
+            <p class="clr-q">${esc(c.question || "")}</p>
+            <div class="clr-meta"><span>asked by <b>${esc(asker)}</b></span>${c.origin_task_id ? `<span class="clr-meta-dot"></span><span>${esc(c.origin_task_id)}</span>` : ""}${ts ? `<span class="clr-meta-dot"></span><span>${esc(ts)}</span>` : ""}</div>
+          </div>
+          <span class="clr-wait-badge"><span class="clr-wait-dot"></span>Awaiting you</span>
+        </div>
+        <div class="clr-chain">${renderClarificationChain(c.chain || [])}</div>
+        <div class="clr-answer">
+          <textarea id="clr-input-${esc(id)}" placeholder="Type your answer… it is delivered to ${esc(asker)} and their blocked task resumes."></textarea>
+          <div class="clr-answer-actions">
+            <span class="clr-answer-hint">Escalated through ${hops} level${hops === 1 ? "" : "s"} before reaching you.</span>
+            <button class="clr-answer-submit" data-action="answer-clarification" data-clr-id="${esc(id)}">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M2 8h11M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Send answer
+            </button>
+          </div>
+        </div>
+      </div>`;
+  }
+  function renderClarificationInbox() {
+    const section = document.getElementById("home-clarifications-section");
+    const host = document.getElementById("home-clarifications");
+    const countEl = document.getElementById("clarifications-count");
+    const badge = document.getElementById("sb-inbox-badge");
+    const inboxBtn = document.getElementById("sb-inbox-btn");
+    const list = lastClarifications || [];
+    const n = list.length;
+    if (countEl) countEl.textContent = String(n);
+    if (badge) badge.textContent = String(n);
+    if (inboxBtn) inboxBtn.hidden = n === 0;
+    if (section) section.hidden = n === 0;
+    if (host) host.innerHTML = n ? list.map(renderClarificationCard).join("") : "";
+  }
+  async function fetchClarifications() {
+    try {
+      const res = await fetch("/api/clarifications?pending=1", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      lastClarifications = data.clarifications || [];
+    } catch (err) {
+      console.error("clarifications", err);
+      lastClarifications = [];
+    }
+    renderClarificationInbox();
+  }
+  async function answerClarification(id) {
+    const input = document.getElementById(`clr-input-${id}`);
+    const answer = (input && input.value || "").trim();
+    if (!answer) {
+      if (input) input.focus();
+      return;
+    }
+    const btn = document.querySelector(`.clr-answer-submit[data-clr-id="${id}"]`);
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Sending…";
+    }
+    try {
+      const res = await fetch(`/api/clarifications/${encodeURIComponent(id)}/answer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answer })
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "answer failed");
+      await fetchClarifications();
+      refresh().catch((err) => console.error(err));
+    } catch (err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Send answer";
+      }
+      console.error("answerClarification", err);
+      alert("Could not submit answer: " + err);
+    }
+  }
   async function refresh() {
     const stateUrl = selectedTaskId ? `/api/state?task_id=${encodeURIComponent(selectedTaskId)}` : "/api/state";
     const res = await fetch(stateUrl, { cache: "no-store" });
@@ -15154,6 +15280,7 @@ function initializeDashboard() {
     await refreshDemoStatus();
     document.getElementById("replay").textContent = data.event_replay;
     document.getElementById("trajectories").textContent = data.trajectories;
+    fetchClarifications().catch((err) => console.error(err));
     connectStream();
   }
   function renderTaskFilterOptions(tasks) {
@@ -15181,6 +15308,14 @@ function initializeDashboard() {
     if (action === "close-detail") {
       selectedAgentId = null;
       renderAgentDetail();
+    }
+    if (action === "answer-clarification") {
+      answerClarification(target.dataset.clrId || "");
+    }
+    if (action === "scroll-clarifications") {
+      closeSettingsView();
+      const sec = document.getElementById("home-clarifications-section");
+      if (sec) sec.scrollIntoView({ behavior: "smooth", block: "start" });
     }
     if (action === "toggle-node") {
       const agentId = target.dataset.agentId;
