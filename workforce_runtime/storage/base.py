@@ -7,6 +7,7 @@ from workforce_runtime.core.agent_profile import AgentProfile
 from workforce_runtime.core.agent_inbox import AgentInboxItem, AgentInboxItemStatus
 from workforce_runtime.core.agent_personal_profile import AgentPersonalProfile
 from workforce_runtime.core.artifact import Artifact
+from workforce_runtime.core.clarification import Clarification
 from workforce_runtime.core.events import Event
 from workforce_runtime.core.organization import Company
 from workforce_runtime.core.report import ReportContract
@@ -91,6 +92,12 @@ class RuntimeStore(Protocol):
     def list_reports_by_task(self, task_id: str) -> list[ReportContract]: ...
 
     def list_reports(self) -> list[ReportContract]: ...
+
+    def save_clarification(self, clarification: Clarification) -> None: ...
+
+    def get_clarification(self, clarification_id: str) -> Clarification | None: ...
+
+    def list_clarifications(self) -> list[Clarification]: ...
 
     def save_event(self, event: Event) -> None: ...
 

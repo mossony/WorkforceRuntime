@@ -1152,8 +1152,17 @@ def _execution_chain(organization: Organization) -> list[Any]:
         raise ValueError("organization has no root agent")
     root = sorted(roots, key=lambda agent: agent.id)[0]
     leaves = [agent for agent in organization.agents if not by_manager.get(agent.id)]
-    artifact_workers = [agent for agent in leaves if SUBMIT_ARTIFACT in agent.permissions]
-    workers = artifact_workers or [agent for agent in leaves if "worker" in agent.worker_type.lower()]
+    # A reviewer can also hold submit_artifact, but it is not the terminal worker
+    # that produces the deliverable, so exclude reviewer-ish leaves from selection.
+    def _is_reviewer(agent: Any) -> bool:
+        return "review" in f"{agent.role} {agent.name}".lower()
+
+    artifact_workers = [
+        agent for agent in leaves if SUBMIT_ARTIFACT in agent.permissions and not _is_reviewer(agent)
+    ]
+    workers = artifact_workers or [
+        agent for agent in leaves if "worker" in agent.worker_type.lower() and not _is_reviewer(agent)
+    ]
     worker = sorted(workers or leaves, key=lambda agent: agent.id)[0]
     chain = list(reversed(organization.get_reporting_chain(worker.id))) + [worker]
     if not chain or chain[0].id != root.id:

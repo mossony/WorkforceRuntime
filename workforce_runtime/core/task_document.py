@@ -14,6 +14,7 @@ TaskDocumentType = Literal[
     "note",
     "risk",
     "tool_request",
+    "clarification",
 ]
 
 

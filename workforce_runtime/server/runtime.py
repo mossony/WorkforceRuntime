@@ -15,7 +15,9 @@ from workforce_runtime.core import (
     AgentProfile,
     Artifact,
     Budget,
+    Clarification,
     Event,
+    HUMAN_HOLDER,
     Organization,
     ReportContract,
     SkillAssignment,
@@ -961,6 +963,255 @@ class WorkforceRuntime:
         if task_id is not None:
             self._refresh_related_task_trace_exports(task_id)
         return event
+
+    # ------------------------------------------------------------------
+    # Escalating clarification
+    #
+    # A lower agent that cannot proceed because something is ambiguous raises a
+    # clarification. It routes to the agent's direct manager; any holder that
+    # cannot answer escalates it one level up. If it passes the top-level agent
+    # (no manager) unanswered it becomes awaiting_human and the operator answers.
+    # The answer is recorded on the origin task and the blocked task is resumed.
+    # ------------------------------------------------------------------
+
+    def raise_clarification(
+        self,
+        *,
+        from_agent_id: str,
+        question: str,
+        task_id: str | None = None,
+        thread_id: str = "",
+    ) -> Clarification:
+        if self.store.get_agent(from_agent_id) is None:
+            raise KeyError(f"agent not found: {from_agent_id}")
+        if not question.strip():
+            raise ValueError("clarification question is required")
+        clarification = Clarification(
+            clarification_id=f"clr_{uuid4().hex[:12]}",
+            question=question.strip(),
+            asker_agent_id=from_agent_id,
+            origin_task_id=task_id,
+            current_holder_id=from_agent_id,
+            status="open",
+            chain=[from_agent_id],
+            thread_id=thread_id or f"clarification:{uuid4().hex[:8]}",
+        )
+        if task_id is not None:
+            self._block_task_for_clarification(task_id, clarification)
+        return self._route_clarification_up(clarification, escalating_agent_id=from_agent_id, first_hop=True)
+
+    def escalate_clarification(
+        self,
+        *,
+        clarification_id: str,
+        from_agent_id: str,
+        note: str = "",
+    ) -> Clarification:
+        clarification = self._require_clarification(clarification_id)
+        if clarification.is_terminal():
+            raise ValueError(f"clarification {clarification_id} is already {clarification.status}")
+        if from_agent_id != clarification.current_holder_id:
+            raise PermissionError(
+                f"clarification {clarification_id} is held by {clarification.current_holder_id}, not {from_agent_id}"
+            )
+        return self._route_clarification_up(
+            clarification, escalating_agent_id=from_agent_id, first_hop=False, note=note
+        )
+
+    def answer_clarification(
+        self,
+        *,
+        clarification_id: str,
+        from_agent_id: str,
+        answer: str,
+    ) -> Clarification:
+        clarification = self._require_clarification(clarification_id)
+        if clarification.is_terminal():
+            raise ValueError(f"clarification {clarification_id} is already {clarification.status}")
+        if not answer.strip():
+            raise ValueError("clarification answer is required")
+        if clarification.status == "awaiting_human":
+            if from_agent_id not in {HUMAN_HOLDER, "system", "runtime"}:
+                raise PermissionError("only the human operator can answer an escalated clarification")
+            answered_by = HUMAN_HOLDER
+        else:
+            if from_agent_id != clarification.current_holder_id:
+                raise PermissionError(
+                    f"clarification {clarification_id} is held by {clarification.current_holder_id}, not {from_agent_id}"
+                )
+            answered_by = from_agent_id
+        clarification = clarification.model_copy(
+            update={
+                "status": "resolved",
+                "answer": answer.strip(),
+                "answered_by": answered_by,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
+        self.store.save_clarification(clarification)
+        self.record_event(
+            event_type="clarification_answered",
+            actor_id=answered_by,
+            task_id=clarification.origin_task_id,
+            payload={
+                "clarification_id": clarification.clarification_id,
+                "asker": clarification.asker_agent_id,
+                "answered_by": answered_by,
+                "answer": _clip_event_text(answer),
+            },
+        )
+        self._deliver_clarification_answer(clarification)
+        return clarification
+
+    def list_clarifications(self, *, status: str | None = None) -> list[Clarification]:
+        items = self.store.list_clarifications()
+        if status is not None:
+            items = [item for item in items if item.status == status]
+        return items
+
+    def _require_clarification(self, clarification_id: str) -> Clarification:
+        clarification = self.store.get_clarification(clarification_id)
+        if clarification is None:
+            raise KeyError(f"clarification not found: {clarification_id}")
+        return clarification
+
+    def _route_clarification_up(
+        self,
+        clarification: Clarification,
+        *,
+        escalating_agent_id: str,
+        first_hop: bool,
+        note: str = "",
+    ) -> Clarification:
+        escalating = self.store.get_agent(escalating_agent_id)
+        manager_id = escalating.manager_id if escalating is not None else None
+        if manager_id and self.store.get_agent(manager_id) is not None:
+            chain = clarification.chain if manager_id in clarification.chain else [*clarification.chain, manager_id]
+            clarification = clarification.model_copy(
+                update={
+                    "current_holder_id": manager_id,
+                    "status": "open",
+                    "chain": chain,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            )
+            self.store.save_clarification(clarification)
+            self.record_event(
+                event_type="clarification_raised" if first_hop else "clarification_escalated",
+                actor_id=escalating_agent_id,
+                task_id=clarification.origin_task_id,
+                payload={
+                    "clarification_id": clarification.clarification_id,
+                    "to_agent_id": manager_id,
+                    "asker": clarification.asker_agent_id,
+                    "question": _clip_event_text(clarification.question),
+                    "note": _clip_event_text(note),
+                },
+            )
+            self.enqueue_agent_inbox_item(
+                agent_id=manager_id,
+                kind="clarification",
+                from_agent_id=escalating_agent_id,
+                task_id=clarification.origin_task_id,
+                thread_id=clarification.thread_id,
+                payload={
+                    "clarification_id": clarification.clarification_id,
+                    "question": clarification.question,
+                    "asker": clarification.asker_agent_id,
+                    "origin_task_id": clarification.origin_task_id,
+                },
+                priority=10,
+                idempotency_key=f"clarification:{clarification.clarification_id}:{manager_id}",
+            )
+            return clarification
+        else:
+            # Reached the top of the chain (no manager) -> ask the human operator.
+            chain = clarification.chain if HUMAN_HOLDER in clarification.chain else [*clarification.chain, HUMAN_HOLDER]
+            clarification = clarification.model_copy(
+                update={
+                    "current_holder_id": HUMAN_HOLDER,
+                    "status": "awaiting_human",
+                    "chain": chain,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            )
+            self.store.save_clarification(clarification)
+            self.record_event(
+                event_type="human_clarification_requested",
+                actor_id=escalating_agent_id,
+                task_id=clarification.origin_task_id,
+                payload={
+                    "clarification_id": clarification.clarification_id,
+                    "asker": clarification.asker_agent_id,
+                    "question": _clip_event_text(clarification.question),
+                    "chain": clarification.chain,
+                },
+            )
+            return clarification
+
+    def _block_task_for_clarification(self, task_id: str, clarification: Clarification) -> None:
+        task = self.store.get_task(task_id)
+        if task is None:
+            return
+        self.store.save_task(task.model_copy(update={"status": "blocked"}))
+        self.record_event(
+            event_type="task_blocked_on_clarification",
+            actor_id=clarification.asker_agent_id,
+            task_id=task_id,
+            payload={"clarification_id": clarification.clarification_id},
+        )
+
+    def _deliver_clarification_answer(self, clarification: Clarification) -> None:
+        task_id = clarification.origin_task_id
+        if not task_id or self.store.get_task(task_id) is None:
+            return
+        try:
+            self.upsert_task_document(
+                actor_id="runtime",
+                task_id=task_id,
+                title=f"Clarification answer: {clarification.question[:60]}",
+                content=(
+                    f"Question (from {clarification.asker_agent_id}): {clarification.question}\n\n"
+                    f"Answer (from {clarification.answered_by}): {clarification.answer}"
+                ),
+                doc_type="clarification",
+            )
+        except Exception as exc:  # noqa: BLE001 - answer delivery must not break resolution.
+            self.record_event(
+                event_type="clarification_answer_doc_failed",
+                actor_id="runtime",
+                task_id=task_id,
+                payload={"clarification_id": clarification.clarification_id, "error": _clip_event_text(str(exc))},
+            )
+        self._resume_task_after_clarification(clarification)
+
+    def _resume_task_after_clarification(self, clarification: Clarification) -> None:
+        task_id = clarification.origin_task_id
+        task = self.store.get_task(task_id) if task_id else None
+        if task is None:
+            return
+        asker = clarification.asker_agent_id
+        self.store.save_task(task.model_copy(update={"status": "assigned", "assigned_to": asker}))
+        self._mark_agent_assigned(asker, task_id)
+        self.record_event(
+            event_type="task_resumed_after_clarification",
+            actor_id=clarification.answered_by or "runtime",
+            task_id=task_id,
+            payload={"clarification_id": clarification.clarification_id, "assigned_to": asker},
+        )
+        self.enqueue_agent_inbox_item(
+            agent_id=asker,
+            kind="assignment",
+            from_agent_id="runtime",
+            task_id=task_id,
+            payload={
+                "task_id": task_id,
+                "title": task.title,
+                "objective": task.objective,
+                "clarification_answer": clarification.answer,
+            },
+            idempotency_key=f"assignment_resume:{clarification.clarification_id}:{asker}",
+        )
 
     def register_artifact(self, artifact: Artifact) -> None:
         self.require_permission(artifact.agent_id, SUBMIT_ARTIFACT, task_id=artifact.task_id)

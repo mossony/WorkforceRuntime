@@ -403,7 +403,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "mcp" and args.mcp_command == "serve":
         from workforce_runtime.mcp.server import serve_stdio
 
-        serve_stdio(args.db)
+        # A worker spawns this MCP server scoped to the runtime DB via
+        # WORKFORCE_RUNTIME_DB; honor it so tool calls (assign, clarification,
+        # report, ...) land in the same database the runtime/dispatcher uses.
+        env_db = os.environ.get("WORKFORCE_RUNTIME_DB")
+        serve_stdio(env_db or args.db)
         return
 
     if args.command == "mcp" and args.mcp_command == "dashboard":

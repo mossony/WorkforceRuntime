@@ -110,11 +110,43 @@ class AgentInboxDispatcher:
             task = self.runtime.require_task(task_id)
             self._run_agent_task(agent, task)
             return
+        if item.kind == "clarification":
+            task = self._clarification_task_for(agent, item)
+            self._run_agent_task(agent, task)
+            return
         if item.kind in {"message", "human_steer", "system_notice"}:
             task = self._message_task_for(agent, item)
             self._run_agent_task(agent, task)
             return
         raise ValueError(f"unsupported inbox item kind: {item.kind}")
+
+    def _clarification_task_for(self, agent: AgentProfile, item: AgentInboxItem) -> TaskContract:
+        clarification_id = str(item.payload.get("clarification_id") or "")
+        question = str(item.payload.get("question") or "")
+        asker = str(item.payload.get("asker") or item.from_agent_id)
+        origin_task_id = item.task_id or str(item.payload.get("origin_task_id") or "")
+        context_refs = [f"clarification:{clarification_id}"]
+        if origin_task_id:
+            context_refs.append(f"task:{origin_task_id}")
+        return self.runtime.create_task(
+            title=f"Clarify: {question[:50]}",
+            objective=(
+                f"Your subordinate {asker} raised a clarification you must resolve:\n\n"
+                f"QUESTION: {question}\n\n"
+                f"If you can answer confidently, call answer_clarification(from_agent_id=\"{agent.id}\", "
+                f"clarification_id=\"{clarification_id}\", answer=\"...\"). The answer is delivered to "
+                f"{asker} and their blocked task resumes. If you cannot answer confidently, call "
+                f"escalate_clarification(from_agent_id=\"{agent.id}\", clarification_id=\"{clarification_id}\") "
+                "to pass it one level up the management chain."
+            ),
+            assign_to=agent.id,
+            assigned_by="runtime",
+            parent_task_id=origin_task_id or None,
+            context_refs=context_refs,
+            constraints=["Either answer or escalate the clarification; do not ignore it."],
+            acceptance_criteria=["The clarification is answered or escalated via MCP tools."],
+            required_artifacts=[],
+        )
 
     def _message_task_for(self, agent: AgentProfile, item: AgentInboxItem) -> TaskContract:
         message = str(item.payload.get("message") or item.payload.get("summary") or item.kind)

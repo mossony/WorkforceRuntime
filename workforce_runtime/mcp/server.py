@@ -23,8 +23,11 @@ from workforce_runtime.mcp.external import ExternalMCPRegistry, ResolvedExternal
 from workforce_runtime.mcp.tools.get_agent_profiles import get_agent_profiles
 from workforce_runtime.mcp.tools.get_org_context import get_org_context
 from workforce_runtime.mcp.tools.get_task_context import get_task_context
+from workforce_runtime.mcp.tools.answer_clarification import answer_clarification
+from workforce_runtime.mcp.tools.ask_clarification import ask_clarification
 from workforce_runtime.mcp.tools.assign import assign
 from workforce_runtime.mcp.tools.check_progress import check_progress
+from workforce_runtime.mcp.tools.escalate_clarification import escalate_clarification
 from workforce_runtime.mcp.tools.claim_inbox import claim_inbox
 from workforce_runtime.mcp.tools.claim_work import claim_work
 from workforce_runtime.mcp.tools.complete_inbox import complete_inbox
@@ -59,6 +62,9 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "report_to_human": report_to_human,
     "review_report": review_report,
     "assign": assign,
+    "ask_clarification": ask_clarification,
+    "escalate_clarification": escalate_clarification,
+    "answer_clarification": answer_clarification,
     "check_progress": check_progress,
     "discuss": discuss,
     "hire": hire,
@@ -107,6 +113,10 @@ QUEUE_CONTROL_TOOLS = {
 TOOL_REQUIRED_CAPABILITY: dict[str, str] = {
     "assign": DELEGATE_TASK,
     "review_report": DELEGATE_TASK,
+    # Only managers hold clarifications (they route upward), so only they need
+    # to escalate/answer them. ask_clarification stays universal (any worker).
+    "escalate_clarification": DELEGATE_TASK,
+    "answer_clarification": DELEGATE_TASK,
     "hire": HIRE_AGENT,
     "update_system_prompt": HIRE_AGENT,
     "update_agent_profile": HIRE_AGENT,
@@ -223,6 +233,53 @@ def tool_specs() -> list[dict[str, object]]:
                     "message": {"type": "string"},
                     "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
                     "required_artifacts": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+        {
+            "name": "ask_clarification",
+            "description": (
+                "Ask your manager to clarify something ambiguous that blocks your task. "
+                "It escalates up the management chain until someone can answer; if it reaches "
+                "the top unanswered, the human operator is asked. Use this instead of guessing."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["from_agent_id", "question"],
+                "properties": {
+                    "from_agent_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "question": {"type": "string"},
+                    "thread_id": {"type": "string"},
+                },
+            },
+        },
+        {
+            "name": "escalate_clarification",
+            "description": (
+                "If a subordinate asked you a clarification you cannot confidently answer, "
+                "escalate it one level up to your own manager (or to the human if you are the top)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["from_agent_id", "clarification_id"],
+                "properties": {
+                    "from_agent_id": {"type": "string"},
+                    "clarification_id": {"type": "string"},
+                    "note": {"type": "string"},
+                },
+            },
+        },
+        {
+            "name": "answer_clarification",
+            "description": "Answer a clarification you are currently holding; the answer is delivered to the original asker and their task resumes.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["from_agent_id", "clarification_id", "answer"],
+                "properties": {
+                    "from_agent_id": {"type": "string"},
+                    "clarification_id": {"type": "string"},
+                    "answer": {"type": "string"},
                 },
             },
         },

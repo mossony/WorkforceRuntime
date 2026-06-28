@@ -8,7 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from workforce_runtime.core.events import utc_now
 
 
-AgentInboxItemKind = Literal["assignment", "message", "report_review", "human_steer", "system_notice"]
+AgentInboxItemKind = Literal[
+    "assignment", "message", "report_review", "human_steer", "system_notice", "clarification"
+]
 AgentInboxItemStatus = Literal["queued", "leased", "completed", "failed", "cancelled", "interrupted"]
 AgentInboxInterruptMode = Literal["none", "soft", "steer", "hard"]
 

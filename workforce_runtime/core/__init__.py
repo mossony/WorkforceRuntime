@@ -11,6 +11,7 @@ from workforce_runtime.core.agent_inbox import (
 from workforce_runtime.core.agent_personal_profile import AgentExperience, AgentPersonalProfile
 from workforce_runtime.core.artifact import Artifact
 from workforce_runtime.core.budget import Budget, UsageCost
+from workforce_runtime.core.clarification import Clarification, ClarificationStatus, HUMAN_HOLDER
 from workforce_runtime.core.events import Event
 from workforce_runtime.core.organization import Company, Organization
 from workforce_runtime.core.report import ReportContract
@@ -40,8 +41,11 @@ __all__ = [
     "AgentStatus",
     "Artifact",
     "Budget",
+    "Clarification",
+    "ClarificationStatus",
     "Company",
     "ClaimedAgentInboxItem",
+    "HUMAN_HOLDER",
     "Event",
     "Organization",
     "ReportContract",

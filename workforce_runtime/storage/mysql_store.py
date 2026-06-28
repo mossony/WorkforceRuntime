@@ -14,6 +14,7 @@ from workforce_runtime.core.agent_inbox import AgentInboxItem, AgentInboxItemSta
 from workforce_runtime.core.agent_personal_profile import AgentPersonalProfile
 from workforce_runtime.core.agent_profile import AgentProfile
 from workforce_runtime.core.artifact import Artifact
+from workforce_runtime.core.clarification import Clarification
 from workforce_runtime.core.events import Event
 from workforce_runtime.core.organization import Company
 from workforce_runtime.core.report import ReportContract
@@ -171,6 +172,17 @@ class MySQLStore(RuntimeStore):
                     task_id VARCHAR(255) NOT NULL,
                     payload LONGTEXT NOT NULL,
                     INDEX idx_reports_task (task_id)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS clarifications (
+                    clarification_id VARCHAR(255) PRIMARY KEY,
+                    task_id VARCHAR(255),
+                    status VARCHAR(64) NOT NULL,
+                    payload LONGTEXT NOT NULL,
+                    INDEX idx_clarifications_status (status)
                 )
                 """
             )
@@ -421,6 +433,28 @@ class MySQLStore(RuntimeStore):
     def list_reports(self) -> list[ReportContract]:
         rows = self._fetchall("SELECT payload FROM reports ORDER BY report_id")
         return [ReportContract.model_validate_json(row["payload"]) for row in rows]
+
+    def save_clarification(self, clarification: Clarification) -> None:
+        self._execute_upsert(
+            "clarifications",
+            ["clarification_id", "task_id", "status", "payload"],
+            (
+                clarification.clarification_id,
+                clarification.origin_task_id,
+                clarification.status,
+                clarification.model_dump_json(),
+            ),
+        )
+
+    def get_clarification(self, clarification_id: str) -> Clarification | None:
+        row = self._fetchone(
+            "SELECT payload FROM clarifications WHERE clarification_id = %s", (clarification_id,)
+        )
+        return None if row is None else Clarification.model_validate_json(row["payload"])
+
+    def list_clarifications(self) -> list[Clarification]:
+        rows = self._fetchall("SELECT payload FROM clarifications ORDER BY clarification_id")
+        return [Clarification.model_validate_json(row["payload"]) for row in rows]
 
     def save_event(self, event: Event) -> None:
         with self._conn.cursor() as cursor:

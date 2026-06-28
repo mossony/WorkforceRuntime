@@ -382,6 +382,8 @@ When Workforce Runtime MCP tools are available:
 - Use get_task_dossier() to fetch requirements, division of work, task documents, reports, artifacts, and recent events.
 - Use upsert_task_doc() to preserve new requirements, decisions, notes, risks, or division-of-work updates.
 - Use request_tool() when repeated missing capabilities make the task unnecessarily manual.
+- If something required to do the task is genuinely ambiguous, call ask_clarification(question=...) instead of guessing; it escalates up the chain (and to the human if needed) and your answer comes back before you continue.
+- If you are asked to resolve a clarification, answer_clarification() when you can decide it, otherwise escalate_clarification() to pass it up.
 - If this is a report-review task, inspect the report and artifacts, then call review_report() with an explicit decision.
 
 When you finish, provide a concise final report with:

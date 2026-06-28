@@ -1295,6 +1295,37 @@ def make_web_dashboard_server(
             )
         return HTTPStatus.OK, {"ok": True, "deleted": task_id}
 
+    def list_clarifications_payload(only_pending: bool = False) -> tuple[int, dict[str, Any]]:
+        with WorkforceRuntime(db) as runtime:
+            items = runtime.list_clarifications()
+        clarifications = [item.model_dump(mode="json") for item in items]
+        pending = [c for c in clarifications if c.get("status") == "awaiting_human"]
+        return HTTPStatus.OK, {
+            "ok": True,
+            "clarifications": pending if only_pending else clarifications,
+            "pending_human_count": len(pending),
+        }
+
+    def answer_clarification_from_dashboard(clarification_id: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        clarification_id = (clarification_id or "").strip()
+        answer = str(payload.get("answer") or "").strip()
+        if not clarification_id:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "clarification_id is required"}
+        if not answer:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "answer is required"}
+        try:
+            with WorkforceRuntime(db) as runtime:
+                clarification = runtime.answer_clarification(
+                    clarification_id=clarification_id,
+                    from_agent_id="human",
+                    answer=answer,
+                )
+        except KeyError as exc:
+            return HTTPStatus.NOT_FOUND, {"ok": False, "error": str(exc)}
+        except (ValueError, PermissionError) as exc:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+        return HTTPStatus.OK, {"ok": True, "clarification": clarification.model_dump(mode="json")}
+
     def steer_agent_from_dashboard(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         agent_id = str(payload.get("agent_id") or "").strip()
         message = str(payload.get("message") or "").strip()
@@ -1650,6 +1681,12 @@ def make_web_dashboard_server(
                 with WorkforceRuntime(db) as runtime:
                     self._send_text(render_agent_trajectories(runtime.store))
                 return
+            if parsed.path == "/api/clarifications":
+                query = parse_qs(parsed.query)
+                only_pending = query.get("pending", ["0"])[0] in {"1", "true", "yes"}
+                status, payload = list_clarifications_payload(only_pending=only_pending)
+                self._send_json(payload, status=status)
+                return
             if parsed.path == "/healthz":
                 self._send_json({"ok": True})
                 return
@@ -1712,6 +1749,13 @@ def make_web_dashboard_server(
             if parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/rename"):
                 task_id = unquote(parsed.path.removeprefix("/api/tasks/").removesuffix("/rename"))
                 status, payload = rename_task_from_dashboard(task_id, self._read_json_body())
+                self._send_json(payload, status=status)
+                return
+            if parsed.path.startswith("/api/clarifications/") and parsed.path.endswith("/answer"):
+                clarification_id = unquote(
+                    parsed.path.removeprefix("/api/clarifications/").removesuffix("/answer")
+                )
+                status, payload = answer_clarification_from_dashboard(clarification_id, self._read_json_body())
                 self._send_json(payload, status=status)
                 return
             self.send_error(HTTPStatus.NOT_FOUND, "not found")
