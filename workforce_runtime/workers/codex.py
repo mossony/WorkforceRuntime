@@ -9,7 +9,7 @@ from uuid import uuid4
 from workforce_runtime.config import format_model_context_note, load_runtime_config
 from workforce_runtime.config.model_failover import is_unavailable_model_error
 from workforce_runtime.core import Artifact, ReportContract, TaskContract, UsageCost
-from workforce_runtime.core.permissions import DELEGATE_TASK, REPORT_TO_HUMAN, SUBMIT_ARTIFACT
+from workforce_runtime.core.permissions import DELEGATE_TASK, REPORT_TO_HUMAN
 from workforce_runtime.storage import FileStore
 from workforce_runtime.workers.base import RuntimeContext, WorkerRun
 from workforce_runtime.workers.env import worker_process_env
@@ -348,44 +348,47 @@ class CodexWorker:
             "mcp_servers.workforce.tool_timeout_sec=120",
         ]
 
-    def _role_guidance(self, runtime_context: RuntimeContext, *, is_manager: bool) -> str:
+    def _direct_reports(self, runtime_context: RuntimeContext) -> list:
+        return [
+            a
+            for a in runtime_context.runtime.store.list_agents()
+            if a.manager_id == runtime_context.agent_id
+        ]
+
+    def _role_guidance(self, *, is_manager: bool, reports: list) -> str:
         if not is_manager:
             return (
                 "You are an EXECUTION worker. Do the work yourself inside the workspace, "
                 "then use submit_artifact() to register every deliverable file and report() "
                 "to send structured completion evidence to your manager. Do NOT delegate."
             )
-        reports = [
-            a
-            for a in runtime_context.runtime.store.list_agents()
-            if a.manager_id == runtime_context.agent_id
-        ]
-        if reports:
-            roster = "\n".join(f"  - {a.id} (role: {a.role})" for a in reports)
-        else:
-            roster = "  (no direct reports configured)"
+        roster = "\n".join(f"  - {a.id} (role: {a.role})" for a in reports)
         return (
-            "You are a MANAGEMENT agent. You CANNOT submit artifacts or do the implementation "
-            "yourself. You MUST break the objective into concrete work and delegate it to your "
-            "direct reports using the assign() MCP tool, e.g. "
+            "You are a MANAGEMENT agent with direct reports. Do NOT implement the deliverable "
+            "or submit artifacts yourself — your job is to divide and delegate the work.\n"
+            "1. Read the objective and decide how to split it into concrete sub-tasks.\n"
+            "2. Record that plan with upsert_task_doc(doc_type=\"division_of_work\", ...) so the "
+            "context is preserved for whoever executes it.\n"
+            "3. Delegate each sub-task to a direct report with the assign() MCP tool, e.g. "
             "assign(to_agent_id=\"<report id>\", title=\"...\", objective=\"...\", "
-            "parent_task_id=\"<this task id>\"). Your direct reports are:\n"
-            f"{roster}\n"
-            "After delegating, use report() to summarize how you divided the work. Do NOT call "
-            "submit_artifact() and do NOT create deliverable files yourself."
+            "parent_task_id=\"<this task id>\").\n"
+            "4. After delegating, use report() (or report_to_human() if you have no manager) to "
+            "summarize how you divided the work.\n"
+            "Your direct reports are:\n"
+            f"{roster}"
         )
 
     def _build_prompt(self, task: TaskContract, runtime_context: RuntimeContext) -> str:
         agent = runtime_context.runtime.get_agent(runtime_context.agent_id)
         model = agent.model if agent is not None else ""
         permissions = list(agent.permissions) if agent is not None else []
-        can_submit = SUBMIT_ARTIFACT in permissions
         can_delegate = DELEGATE_TASK in permissions
-        # A management agent can delegate but cannot submit artifacts directly. It
-        # must hand work down to its direct reports instead of doing it itself,
-        # otherwise it will hit permission walls (e.g. submit_artifact) and fail.
-        is_manager = can_delegate and not can_submit
-        role_guidance = self._role_guidance(runtime_context, is_manager=is_manager)
+        reports = self._direct_reports(runtime_context)
+        # An agent is a manager when it can delegate AND actually has reports to
+        # delegate to — based on org structure, not on whether it also happens to
+        # hold submit_artifact (evidence recording is orthogonal to being a leaf).
+        is_manager = can_delegate and bool(reports)
+        role_guidance = self._role_guidance(is_manager=is_manager, reports=reports)
         return f"""You are an AI worker inside Workforce Runtime.
 
 Your agent id is: {runtime_context.agent_id}
