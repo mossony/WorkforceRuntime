@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 from workforce_runtime.workers.base import RuntimeContext
 
@@ -18,7 +19,9 @@ WORKFORCE_MCP_SERVER_NAME = "workforce"
 
 def workforce_mcp_env(runtime_context: RuntimeContext) -> dict[str, str]:
     return {
-        "WORKFORCE_RUNTIME_DB": str(runtime_context.db_path),
+        # Absolute: the MCP server runs with cwd=workspace, so a relative path
+        # would open a phantom empty DB instead of the real runtime DB.
+        "WORKFORCE_RUNTIME_DB": str(Path(runtime_context.db_path).resolve()),
         "WORKFORCE_AGENT_ID": runtime_context.agent_id,
         "WORKFORCE_MANAGER_ID": runtime_context.manager_id or "",
     }

@@ -34,11 +34,20 @@ class CodexWorker:
     ) -> None:
         config = load_runtime_config().get("workers", {}).get("codex", {})
         self.codex_executable = codex_executable or str(config.get("executable") or "codex")
-        self.profile = profile or str(config.get("profile") or "workforce-openrouter")
+        # profile may be set to "" / "native" to use codex's own (native) auth & model.
+        configured_profile = config.get("profile", "workforce-openrouter")
+        self.profile = profile if profile is not None else (str(configured_profile) if configured_profile else "")
+        if self.profile.lower() == "native":
+            self.profile = ""
         self.model = model or config.get("model")
+        # When using native codex, do not force an agent model slug onto it.
+        self.use_native_model = bool(config.get("use_native_model", False))
         self.timeout_seconds = timeout_seconds if timeout_seconds is not None else config.get("timeout_seconds")
         self.approval_policy = approval_policy or str(config.get("approval_policy") or "never")
         self.sandbox_mode = sandbox_mode or str(config.get("sandbox_mode") or "workspace-write")
+        # MCP tool calls are denied under -a never in non-interactive exec; bypass
+        # lets the agent actually invoke Workforce tools (assign, clarification, ...).
+        self.bypass_approvals = bool(config.get("bypass_approvals", False))
         self._runs: dict[str, WorkerRun] = {}
         self._usage: dict[str, dict[str, int]] = {}
 
@@ -75,31 +84,39 @@ class CodexWorker:
 
         agent = runtime_context.runtime.get_agent(runtime_context.agent_id)
         command_model = self.model or (agent.model if agent is not None else None)
+        # Native mode lets codex pick its own model, but an explicitly configured
+        # worker model still wins (e.g. tests / pinned-model deployments).
+        if self.use_native_model and not self.model:
+            command_model = None
         # Try the assigned model, then fail over down the configured fallback
         # chain when a run fails with a model-level error (unavailable model or
         # rate limit / 429). Each replacement is persisted on the agent so later
         # runs reuse the working model.
         mcp_config_args = self._mcp_config_args(runtime_context)
+        profile_args = ["--profile", self.profile] if self.profile else []
+        # -a never cancels MCP tool calls in exec mode; bypass enables them.
+        approval_args = (
+            ["--dangerously-bypass-approvals-and-sandbox"]
+            if self.bypass_approvals
+            else ["-a", self.approval_policy, "-s", self.sandbox_mode]
+        )
         attempted_models: list[str] = []
-        max_model_attempts = 6
+        max_model_attempts = 1 if self.use_native_model else 6
         streamed = None
         for _ in range(max_model_attempts):
             attempted_models.append(str(command_model or ""))
             command = [
                 self.codex_executable,
                 *worker_extra_args("codex"),
-                "--profile",
-                self.profile,
+                *profile_args,
                 *mcp_config_args,
                 *(["-m", str(command_model)] if command_model else []),
-                "-a",
-                self.approval_policy,
-                "-s",
-                self.sandbox_mode,
+                *approval_args,
                 "-C",
                 str(workspace),
                 "exec",
                 "--json",
+                "--skip-git-repo-check",
                 "--output-last-message",
                 str(final_message_path),
                 prompt,
@@ -307,7 +324,9 @@ class CodexWorker:
         not forward the full environment to MCP subprocesses.
         """
         mcp_command = sys.executable or "python3"
-        db_path = str(runtime_context.db_path)
+        # The MCP server runs with cwd=workspace; a relative DB path would resolve
+        # against the workspace and open a phantom empty DB. Always pass absolute.
+        db_path = str(Path(runtime_context.db_path).resolve())
         agent_id = runtime_context.agent_id
         manager_id = runtime_context.manager_id or ""
         return [
@@ -321,6 +340,12 @@ class CodexWorker:
             f'mcp_servers.workforce.env.WORKFORCE_AGENT_ID="{agent_id}"',
             "-c",
             f'mcp_servers.workforce.env.WORKFORCE_MANAGER_ID="{manager_id}"',
+            # First call imports the runtime + opens the DB; give it room so the
+            # tool call is not cancelled as a startup/tool timeout.
+            "-c",
+            "mcp_servers.workforce.startup_timeout_sec=30",
+            "-c",
+            "mcp_servers.workforce.tool_timeout_sec=120",
         ]
 
     def _role_guidance(self, runtime_context: RuntimeContext, *, is_manager: bool) -> str:

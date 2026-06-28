@@ -584,9 +584,13 @@ class MCPServer:
 
         try:
             if method == "initialize":
+                params = message.get("params") if isinstance(message.get("params"), dict) else {}
+                # Echo the client's requested protocol version so newer MCP
+                # clients (e.g. codex) accept the server and surface its tools.
+                requested_version = str(params.get("protocolVersion") or "") if params else ""
                 result = {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
+                    "protocolVersion": requested_version or "2024-11-05",
+                    "capabilities": {"tools": {"listChanged": False}},
                     "serverInfo": {"name": "workforce-runtime", "version": "0.1.0"},
                 }
             elif method == "tools/list":
@@ -665,6 +669,11 @@ class MCPServer:
         task_id: str | None,
         resolved_external: ResolvedExternalMCPTool | None = None,
     ) -> dict[str, object]:
+        # Default the caller identity from the env-scoped actor so a model that
+        # omits from_agent_id/agent_id (common) does not fail the tool call.
+        if actor_id and resolved_external is None:
+            arguments.setdefault("from_agent_id", actor_id)
+            arguments.setdefault("agent_id", actor_id)
         if resolved_external is not None:
             executor = lambda: self.external_mcp.execute(
                 self.runtime,
