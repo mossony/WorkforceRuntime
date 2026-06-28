@@ -20,6 +20,7 @@ from workforce_runtime.core import Artifact, ReportContract, TaskContract, Usage
 from workforce_runtime.server.runtime import WorkforceRuntime
 from workforce_runtime.storage import FileStore
 from workforce_runtime.workers.base import RuntimeContext, WorkerRun
+from workforce_runtime.workers.mcp_config import claude_mcp_config_json
 from workforce_runtime.workers.process_runner import _stream_text_flushes
 from workforce_runtime.workers.sandbox import apply_process_sandbox, record_sandbox_application, worker_extra_args
 from workforce_runtime.workers.steering import STEERABLE_SESSIONS
@@ -94,7 +95,13 @@ class ClaudeCodeInteractiveWorker:
         prompt = self._build_prompt(task, runtime_context)
         prompt_path.write_text(prompt)
         terminal_prompt = self._build_terminal_prompt(prompt_path)
-        command = [self.command[0], *worker_extra_args("claude_code_interactive"), *self.command[1:]]
+        command = [
+            self.command[0],
+            *worker_extra_args("claude_code_interactive"),
+            *self.command[1:],
+            "--mcp-config",
+            claude_mcp_config_json(runtime_context),
+        ]
         sandboxed = apply_process_sandbox(command, worker_type="claude_code_interactive", workspace=runtime_context.workspace)
         runtime_context.runtime.update_task_status(task.task_id, status="in_progress", actor_id=runtime_context.agent_id)
         runtime_context.runtime.record_worker_run_started(

@@ -784,18 +784,21 @@ def make_web_dashboard_server(
         management_worker_type = str(payload.get("management_worker_type") or designed_defaults.get("management_worker_type") or "codex")
         worker_worker_type = str(payload.get("worker_worker_type") or designed_defaults.get("worker_worker_type") or "codex")
         use_llm = bool(payload.get("use_llm", True))
-        request = OrgDesignRequest(
-            goal=goal,
-            company_name=str(payload.get("company_name") or designed_defaults.get("company_name") or "Designed Task Workforce"),
-            headcount_limit=headcount_limit,
-            token_budget=token_budget,
-            management_model=management_model,
-            worker_model=worker_model,
-            decision_backend=decision_backend,
-            management_worker_type=management_worker_type,
-            worker_worker_type=worker_worker_type,
-        )
-        organization = OrgDesigner().design(request, use_llm=use_llm, allow_fallback=True)
+        try:
+            request = OrgDesignRequest(
+                goal=goal,
+                company_name=str(payload.get("company_name") or designed_defaults.get("company_name") or "Designed Task Workforce"),
+                headcount_limit=headcount_limit,
+                token_budget=token_budget,
+                management_model=management_model,
+                worker_model=worker_model,
+                decision_backend=decision_backend,
+                management_worker_type=management_worker_type,
+                worker_worker_type=worker_worker_type,
+            )
+            organization = OrgDesigner().design(request, use_llm=use_llm, allow_fallback=True)
+        except Exception as exc:  # noqa: BLE001 - return validation/design errors to the dashboard.
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": f"invalid design request: {exc}"}
         title = _single_line(goal, 72) or "Designed Task"
         case = BenchmarkCase(
             id=f"designed_task_{int(time.time())}",

@@ -843,7 +843,11 @@ class WorkforceRuntime:
         task = self.store.get_task(report.task_id)
         if task is not None:
             self._record_budget_overrun_if_needed(task, report)
-        if task is not None and not self._is_review_task(task):
+        if (
+            task is not None
+            and not self._is_review_task(task)
+            and self.store.get_agent(report.to_agent_id) is not None
+        ):
             self._create_and_run_manager_review(task, report)
         self._refresh_related_task_trace_exports(report.task_id)
 

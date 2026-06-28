@@ -91,7 +91,13 @@ def test_codex_worker_captures_outputs_diff_report_and_usage(tmp_path: Path) -> 
         assert run.provider_session_id == "fake"
         assert run.resume_command == "codex exec resume fake"
         codex_args = json.loads((workspace / "codex-args.json").read_text())
-        assert codex_args[:4] == ["--profile", "test", "-m", "openai/gpt-oss-120b:free"]
+        assert codex_args[:2] == ["--profile", "test"]
+        # The model flag is still passed (after the injected MCP -c overrides).
+        model_index = codex_args.index("-m")
+        assert codex_args[model_index + 1] == "openai/gpt-oss-120b:free"
+        # The Workforce MCP server must be wired in so the agent gets assign()/report()/etc.
+        assert any("mcp_servers.workforce.command" in arg for arg in codex_args)
+        assert any("workforce_runtime" in arg and "mcp" in arg and "serve" in arg for arg in codex_args)
         artifact_names = {path.name for path in worker.collect_artifacts(run.run_id)}
         assert {"task_contract.json", "stdout.log", "stderr.log", "codex-final.md", "diff.patch"} <= artifact_names
         assert worker.get_usage(run.run_id) == {

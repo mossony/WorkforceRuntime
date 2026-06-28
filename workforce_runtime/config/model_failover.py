@@ -21,6 +21,17 @@ DEFAULT_UNAVAILABLE_MODEL_ERROR_FRAGMENTS = (
     "dne",
     "degraded function cannot be invoked",
     "function cannot be invoked",
+    # Rate limiting / quota exhaustion: the model is temporarily unusable, so
+    # failing over to the next model in the chain is the right recovery.
+    "429",
+    "too many requests",
+    "rate limit",
+    "rate-limit",
+    "ratelimit",
+    "resource exhausted",
+    "resource_exhausted",
+    "exceeded retry limit",
+    "quota",
 )
 
 
@@ -28,7 +39,8 @@ def is_unavailable_model_error(error: object) -> bool:
     message = str(error or "").lower()
     if not message:
         return False
-    fragments = _failover_config().get("unavailable_error_fragments") or DEFAULT_UNAVAILABLE_MODEL_ERROR_FRAGMENTS
+    configured = _failover_config().get("unavailable_error_fragments") or ()
+    fragments = tuple(DEFAULT_UNAVAILABLE_MODEL_ERROR_FRAGMENTS) + tuple(str(item) for item in configured)
     return any(str(fragment).lower() in message for fragment in fragments)
 
 

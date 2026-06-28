@@ -10,6 +10,15 @@ from pathlib import Path
 from typing import Any
 
 from workforce_runtime.config import load_runtime_config
+from workforce_runtime.core.permissions import (
+    APPROVE_BUDGET,
+    DELEGATE_TASK,
+    HIRE_AGENT,
+    REPORT,
+    REPORT_TO_HUMAN,
+    REQUEST_BUDGET,
+    SUBMIT_ARTIFACT,
+)
 from workforce_runtime.mcp.external import ExternalMCPRegistry, ResolvedExternalMCPTool
 from workforce_runtime.mcp.tools.get_agent_profiles import get_agent_profiles
 from workforce_runtime.mcp.tools.get_org_context import get_org_context
@@ -88,6 +97,46 @@ QUEUE_CONTROL_TOOLS = {
     "complete_inbox",
     "fail_inbox",
 }
+
+
+# Privileged tools are only listed to agents that hold the matching capability.
+# Tools not in this map are universal (every agent may see and use them, e.g.
+# get_task_dossier, check_progress, request_tool, inbox/work-queue mechanics).
+# NOTE: this only filters what tools/list advertises. Call-time enforcement in
+# the runtime (require_permission) remains the real security boundary.
+TOOL_REQUIRED_CAPABILITY: dict[str, str] = {
+    "assign": DELEGATE_TASK,
+    "review_report": DELEGATE_TASK,
+    "hire": HIRE_AGENT,
+    "update_system_prompt": HIRE_AGENT,
+    "update_agent_profile": HIRE_AGENT,
+    "report_to_human": REPORT_TO_HUMAN,
+    "report": REPORT,
+    "submit_artifact": SUBMIT_ARTIFACT,
+    "request_budget": REQUEST_BUDGET,
+    "decide_tool_request": APPROVE_BUDGET,
+}
+
+
+def visible_tool_specs(runtime: WorkforceRuntime, *, actor_id: str) -> list[dict[str, object]]:
+    """Return the built-in tool specs the given agent is allowed to use.
+
+    Human/system/runtime callers and unknown actors get the full set (no
+    agent profile to scope against); real agents get only tools whose required
+    capability they hold, plus all universal tools.
+    """
+    specs = tool_specs()
+    if not actor_id or actor_id in {"human", "system", "runtime"}:
+        return specs
+    agent = runtime.store.get_agent(actor_id)
+    if agent is None:
+        return specs
+    visible: list[dict[str, object]] = []
+    for spec in specs:
+        capability = TOOL_REQUIRED_CAPABILITY.get(str(spec.get("name")))
+        if capability is None or agent.has_permission(capability):
+            visible.append(spec)
+    return visible
 
 
 def tool_specs() -> list[dict[str, object]]:
@@ -488,7 +537,12 @@ class MCPServer:
                 actor_id = self.default_actor_id
                 if isinstance(params, dict) and params.get("actor_id"):
                     actor_id = str(params["actor_id"])
-                result = {"tools": [*tool_specs(), *self.external_mcp.tool_specs(self.runtime, actor_id=actor_id)]}
+                result = {
+                    "tools": [
+                        *visible_tool_specs(self.runtime, actor_id=actor_id),
+                        *self.external_mcp.tool_specs(self.runtime, actor_id=actor_id),
+                    ]
+                }
             elif method == "tools/call":
                 params = message.get("params") or {}
                 if not isinstance(params, dict):

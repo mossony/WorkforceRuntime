@@ -346,12 +346,37 @@ Constraints:
 
 def _with_system_prompts(organization: Organization) -> Organization:
     agents = [
-        agent
-        if agent.system_prompt.strip()
-        else agent.model_copy(update={"system_prompt": generate_system_prompt(organization.company, agent)})
-        for agent in organization.agents
+        _finalize_agent(organization.company, agent) for agent in organization.agents
     ]
     return organization.model_copy(update={"agents": agents})
+
+
+def _finalize_agent(company: Company, agent: AgentProfile) -> AgentProfile:
+    update: dict[str, Any] = {}
+    # Every agent must be able to record evidence, even management agents that
+    # occasionally execute work directly (third-party workers do not reliably
+    # delegate). submit_artifact is an evidence capability, not a governance
+    # privilege like delegate/approve_budget/hire.
+    permissions = list(agent.permissions)
+    original = list(permissions)
+    is_root = agent.manager_id is None
+    if SUBMIT_ARTIFACT not in permissions:
+        permissions.append(SUBMIT_ARTIFACT)
+    # The root agent reports upward to the human, not to a manager agent, so it
+    # uses report_to_human() instead of report(). Giving it report() would make
+    # its completion report target the non-existent "human" agent and break the
+    # manager-review flow. Every non-root agent reports to its manager.
+    if is_root:
+        if REPORT_TO_HUMAN not in permissions:
+            permissions.append(REPORT_TO_HUMAN)
+        permissions = [p for p in permissions if p != REPORT]
+    elif REPORT not in permissions:
+        permissions.append(REPORT)
+    if permissions != original:
+        update["permissions"] = permissions
+    if not agent.system_prompt.strip():
+        update["system_prompt"] = generate_system_prompt(company, agent)
+    return agent.model_copy(update=update) if update else agent
 
 
 def _ensure_requested_headcount(

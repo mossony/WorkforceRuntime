@@ -10,6 +10,7 @@ from workforce_runtime.core import Artifact, ReportContract, TaskContract, Usage
 from workforce_runtime.storage import FileStore
 from workforce_runtime.workers.base import RuntimeContext, WorkerRun
 from workforce_runtime.workers.env import worker_process_env
+from workforce_runtime.workers.mcp_config import claude_mcp_config_json
 from workforce_runtime.workers.process_runner import run_process_streaming
 from workforce_runtime.workers.sandbox import apply_process_sandbox, record_sandbox_application, worker_extra_args
 from workforce_runtime.workers.session_resume import (
@@ -65,6 +66,8 @@ class ClaudeCodeWorker:
         command = [
             self.claude_executable,
             *worker_extra_args("claude_code"),
+            "--mcp-config",
+            claude_mcp_config_json(runtime_context),
             "-p",
             prompt,
             "--output-format",
