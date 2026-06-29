@@ -8,7 +8,6 @@ Public alpha validated with 148 automated tests and deterministic end-to-end dem
 
 ![Workforce Runtime animation: a single agent grows into an organized AI workforce](docs/workforce-runtime-animation.webp)
 
-[Standalone HTML animation source](docs/Workforce%20Runtime%20Animation%20%28standalone%29.html)
 
 ## At A Glance
 
