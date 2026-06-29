@@ -11,7 +11,7 @@ const CONFIG = {
 
   width: 1280,
   height: 720,
-  deviceScaleFactor: 2,
+  deviceScaleFactor: 1.5,
 
   fps: 30,
   quality: 92,
