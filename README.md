@@ -23,6 +23,82 @@ Public alpha validated with 148 automated tests and deterministic end-to-end dem
 
 The current package is `workforce-runtime` `0.1.0`, requires Python 3.11+, and ships the `workforce-runtime` CLI from `workforce_runtime.__main__:main`.
 
+## See It In Motion
+
+These short walkthroughs show how work moves through a Workforce Runtime organization.
+
+### 1. Delegate One Goal Through the Organization
+
+A high-level objective moves from the CEO to executives, managers, and specialized workers. Each layer breaks the goal into smaller, accountable tasks.
+
+<div align="center">
+  <img
+    src="docs/animations/animations/exports/01-task-delegation.webp"
+    alt="A CEO delegates a goal through executives and managers to specialized AI workers"
+    width="900"
+  />
+</div>
+
+### 2. Let Agents Request Missing Capabilities
+
+When an agent cannot complete a task with its current tools, it can submit a formal tool request. An authorized manager, VP, CEO, or human can review the request and approve the capability.
+
+<div align="center">
+  <img
+    src="docs/animations/animations/exports/02-tool-request.webp"
+    alt="An AI agent requests a missing tool and receives approval from organizational leadership"
+    width="900"
+  />
+</div>
+
+### 3. Compress Work Up the Reporting Chain
+
+Workers report evidence and results to their direct managers. Managers review and summarize the work, and the CEO turns the organization’s output into a concise report for the human operator.
+
+<div align="center">
+  <img
+    src="docs/animations/animations/exports/03-reporting-up.webp"
+    alt="Worker reports are reviewed and summarized through managers before reaching the CEO and human operator"
+    width="900"
+  />
+</div>
+
+### 4. Inspect Progress and Rebalance the Team
+
+Managers can inspect the active work, reports, and recent events of their direct reports. They can move tasks away from overloaded agents, activate idle capacity, or add another agent when the team needs more help.
+
+<div align="center">
+  <img
+    src="docs/animations/animations/exports/05-rebalance.webp"
+    alt="A manager inspects agent progress and redistributes tasks across the team"
+    width="900"
+  />
+</div>
+
+### 5. Execute Tools Through a Controlled Boundary
+
+Workers can run in a restricted environment. Tool calls may be queued, checked against permissions and concurrency rules, executed inside the configured sandbox, and recorded for audit.
+
+<div align="center">
+  <img
+    src="docs/animations/animations/exports/06-sandbox.webp"
+    alt="An AI worker sends a tool call through a queue, permission checks, and sandboxed execution"
+    width="900"
+  />
+</div>
+
+### 6. Detect Organizational Bottlenecks and Adapt
+
+The experimental Governor analyzes organizational activity, identifies overloaded or missing capabilities, proposes a structural change, and can help reorganize work around the problem.
+
+<div align="center">
+  <img
+    src="docs/animations/animations/exports/07-governor.webp"
+    alt="The Governor detects an organizational bottleneck and proposes a temporary cross-functional team"
+    width="900"
+  />
+</div>
+
 ## Architecture
 
 ```mermaid

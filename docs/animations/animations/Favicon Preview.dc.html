@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg">
+  <style>
+    html, body { margin: 0; padding: 0; }
+  </style>
+</helmet>
+
+<div style="min-height:100vh; background:#f5f4f2; display:flex; align-items:center; justify-content:center; font-family:system-ui, sans-serif;">
+  <div style="display:flex; flex-direction:column; gap:40px; align-items:center;">
+
+    <!-- sizes row -->
+    <div style="display:flex; align-items:flex-end; gap:32px;">
+      <div style="display:flex; flex-direction:column; align-items:center; gap:10px;">
+        <img src="./favicon.svg" width="16" height="16">
+        <span style="font-size:10px; color:#bbb; font-family:monospace;">16</span>
+      </div>
+      <div style="display:flex; flex-direction:column; align-items:center; gap:10px;">
+        <img src="./favicon.svg" width="32" height="32">
+        <span style="font-size:10px; color:#bbb; font-family:monospace;">32</span>
+      </div>
+      <div style="display:flex; flex-direction:column; align-items:center; gap:10px;">
+        <img src="./favicon.svg" width="48" height="48">
+        <span style="font-size:10px; color:#bbb; font-family:monospace;">48</span>
+      </div>
+      <div style="display:flex; flex-direction:column; align-items:center; gap:10px;">
+        <img src="./favicon.svg" width="64" height="64">
+        <span style="font-size:10px; color:#bbb; font-family:monospace;">64</span>
+      </div>
+      <div style="display:flex; flex-direction:column; align-items:center; gap:10px;">
+        <img src="./favicon.svg" width="96" height="96">
+        <span style="font-size:10px; color:#bbb; font-family:monospace;">96</span>
+      </div>
+    </div>
+
+    <!-- on different backgrounds -->
+    <div style="display:flex; gap:3px;">
+      <div style="background:#f5f4f2; width:100px; height:80px; display:flex; align-items:center; justify-content:center; border-radius:4px 0 0 4px; outline:1px solid #e5e3e0;">
+        <img src="./favicon.svg" width="32" height="32">
+      </div>
+      <div style="background:#ffffff; width:100px; height:80px; display:flex; align-items:center; justify-content:center; outline:1px solid #e8e8e8;">
+        <img src="./favicon.svg" width="32" height="32">
+      </div>
+      <div style="background:#0d0d0d; width:100px; height:80px; display:flex; align-items:center; justify-content:center; border-radius:0 4px 4px 0;">
+        <img src="./favicon.svg" width="32" height="32" style="filter:invert(1);">
+      </div>
+    </div>
+
+    <!-- simulated browser tab -->
+    <div style="background:#e2e2e2; border-radius:8px 8px 0 0; padding:10px 16px; display:flex; align-items:center; gap:8px; width:200px;">
+      <img src="./favicon.svg" width="14" height="14">
+      <span style="font-size:12px; color:#333; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Workforce Runtime</span>
+    </div>
+
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

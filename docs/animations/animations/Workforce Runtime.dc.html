@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
+    background: #f4f3f0;
+    color: #1c1b19;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .wr-scroll::-webkit-scrollbar { width: 9px; }
+  .wr-scroll::-webkit-scrollbar-thumb { background: #d6d2cb; border-radius: 6px; border: 3px solid transparent; background-clip: padding-box; }
+  .wr-scroll::-webkit-scrollbar-thumb:hover { background: #c3beb5; background-clip: padding-box; }
+  .wr-scroll::-webkit-scrollbar-track { background: transparent; }
+  @keyframes wrPulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.82); } }
+  @keyframes wrFadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes wrFlow { 0% { background-position: 0 0; } 100% { background-position: 28px 0; } }
+  @keyframes wrSpin { to { transform: rotate(360deg); } }
+</style>
+</helmet>
+
+<div style="display:flex; height:100vh; width:100%; overflow:hidden; background:#f4f3f0;">
+
+  <!-- ============ SIDEBAR : EXPANDED ============ -->
+  <sc-if value="{{ expanded }}" hint-placeholder-val="{{ true }}">
+  <aside style="width:264px; flex:0 0 264px; height:100%; background:#efedea; border-right:1px solid #e3e0da; display:flex; flex-direction:column;">
+
+    <div style="padding:14px 14px 10px 14px; display:flex; align-items:center; gap:8px;">
+      <div style="flex:1; display:flex; position:relative; background:#e4e1db; border:1px solid #dcd8d1; border-radius:9px; padding:3px;">
+        <div style="position:absolute; top:3px; bottom:3px; width:calc(50% - 3px); background:#ffffff; border-radius:7px; box-shadow:0 1px 2px rgba(28,27,25,.10); transition:transform .22s cubic-bezier(.4,0,.2,1); transform:translateX({{ modeShift }});"></div>
+        <button onClick="{{ setSimple }}" style="position:relative; z-index:1; flex:1; border:0; background:transparent; cursor:pointer; padding:6px 0; font-size:12.5px; font-weight:600; letter-spacing:.01em; color:{{ simpleColor }}; font-family:inherit; display:flex; align-items:center; justify-content:center; gap:5px;">
+          <span style="width:5px; height:5px; border-radius:50%; background:#4a8b63; display:inline-block;"></span>Simple
+        </button>
+        <button onClick="{{ setDebug }}" style="position:relative; z-index:1; flex:1; border:0; background:transparent; cursor:pointer; padding:6px 0; font-size:12.5px; font-weight:600; letter-spacing:.01em; color:{{ debugColor }}; font-family:inherit;">Debug</button>
+      </div>
+      <button onClick="{{ toggleSidebar }}" title="Collapse" style="flex:0 0 auto; width:32px; height:32px; border:1px solid #dcd8d1; background:#e4e1db; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#57544e;" style-hover="background:#dcd8d1;">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M6 3.5 2.5 8 6 12.5M13.5 8H3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+
+    <div style="padding:2px 14px 12px 14px;">
+      <button onClick="{{ newTask }}" style="width:100%; border:0; background:#1f1e1b; color:#f6f5f3; border-radius:9px; padding:10px 12px; font-size:13.5px; font-weight:600; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:7px; font-family:inherit; box-shadow:0 1px 2px rgba(28,27,25,.18);" style-hover="background:#000000;">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        New task
+      </button>
+    </div>
+
+    <div style="padding:0 14px 8px 14px;">
+      <div style="display:flex; align-items:center; background:#e7e4de; border:1px solid #ddd9d2; border-radius:8px; padding:6px 9px; gap:7px;">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="flex:0 0 auto; color:#8a867f;"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        <input value="{{ search }}" onInput="{{ onSearch }}" placeholder="Search tasks" style="flex:1; border:0; background:transparent; outline:none; font-size:12.5px; color:#1c1b19; font-family:inherit; min-width:0;"/>
+        <span style="font-size:10.5px; color:#a9a49b; font-variant-numeric:tabular-nums;">{{ taskCount }}</span>
+      </div>
+    </div>
+
+    <div class="wr-scroll" style="flex:1; overflow-y:auto; padding:0 8px 16px 8px;">
+      <sc-for list="{{ groups }}" as="group" hint-placeholder-count="3">
+        <div>
+          <div style="padding:12px 8px 5px 8px; font-size:10.5px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:#a39e95;">{{ group.label }}</div>
+          <sc-for list="{{ group.items }}" as="t" hint-placeholder-count="4">
+            <button onClick="{{ t.select }}" title="{{ t.name }}" style="width:100%; text-align:left; border:0; background:{{ t.bg }}; border-radius:7px; padding:7px 9px; margin-bottom:1px; cursor:pointer; display:flex; align-items:center; gap:9px; font-family:inherit;" style-hover="background:#e5e2db;">
+              <span style="flex:0 0 auto; width:7px; height:7px; border-radius:{{ t.dotRadius }}; background:{{ t.dot }}; box-shadow:{{ t.dotGlow }};"></span>
+              <span style="flex:1; min-width:0; font-size:12.5px; color:{{ t.color }}; font-weight:{{ t.weight }}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ t.name }}</span>
+            </button>
+          </sc-for>
+        </div>
+      </sc-for>
+      <sc-if value="{{ noResults }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:24px 12px; text-align:center; color:#a39e95; font-size:12.5px;">No tasks match “{{ search }}”.</div>
+      </sc-if>
+    </div>
+
+    <div style="padding:10px 16px; border-top:1px solid #e3e0da; display:flex; align-items:center; gap:9px;">
+      <div style="width:26px; height:26px; border-radius:7px; background:#1f1e1b; color:#f6f5f3; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700;">OF</div>
+      <div style="flex:1; min-width:0;">
+        <div style="font-size:12px; font-weight:600; color:#2a2823;">OpenForge workspace</div>
+        <div style="font-size:10.5px; color:#a39e95;">110 agents · 3 active runs</div>
+      </div>
+    </div>
+  </aside>
+  </sc-if>
+
+  <!-- ============ SIDEBAR : COLLAPSED ============ -->
+  <sc-if value="{{ collapsed }}" hint-placeholder-val="{{ false }}">
+  <aside style="width:56px; flex:0 0 56px; height:100%; background:#efedea; border-right:1px solid #e3e0da; display:flex; flex-direction:column; align-items:center; padding:12px 0; gap:10px;">
+    <button onClick="{{ toggleSidebar }}" title="Expand" style="width:34px; height:34px; border:1px solid #dcd8d1; background:#e4e1db; border-radius:9px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#57544e;" style-hover="background:#dcd8d1;">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2.5 4h11M2.5 8h11M2.5 12h11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+    </button>
+    <button onClick="{{ newTask }}" title="New task" style="width:34px; height:34px; border:0; background:#1f1e1b; color:#f6f5f3; border-radius:9px; cursor:pointer; display:flex; align-items:center; justify-content:center; box-shadow:0 1px 2px rgba(28,27,25,.18);" style-hover="background:#000;">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    </button>
+    <div style="width:24px; height:1px; background:#ddd9d2;"></div>
+    <div class="wr-scroll" style="flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:7px; padding:2px 0; width:100%; align-items:center;">
+      <sc-for list="{{ collapsedDots }}" as="t" hint-placeholder-count="8">
+        <button onClick="{{ t.select }}" title="{{ t.name }}" style="width:32px; height:32px; border-radius:8px; border:0; background:{{ t.bg }}; cursor:pointer; display:flex; align-items:center; justify-content:center;" style-hover="background:#e5e2db;">
+          <span style="width:8px; height:8px; border-radius:{{ t.dotRadius }}; background:{{ t.dot }}; box-shadow:{{ t.dotGlow }};"></span>
+        </button>
+      </sc-for>
+    </div>
+    <div style="width:28px; height:28px; border-radius:8px; background:#1f1e1b; color:#f6f5f3; display:flex; align-items:center; justify-content:center; font-size:10.5px; font-weight:700;">OF</div>
+  </aside>
+  </sc-if>
+
+  <!-- ============ MAIN ============ -->
+  <main style="flex:1; min-width:0; height:100%; display:flex; flex-direction:column; background:#f4f3f0;">
+
+    <!-- ORG STATUS BAR -->
+    <div style="flex:0 0 auto; padding:12px 28px 0 28px;">
+      <div style="display:flex; align-items:stretch; background:#ffffff; border:1px solid #e6e3de; border-radius:11px; box-shadow:0 1px 2px rgba(28,27,25,.03); overflow:hidden;">
+        <div style="display:flex; align-items:center; gap:9px; padding:0 16px; border-right:1px solid #eceae5;">
+          <span style="position:relative; display:flex; width:8px; height:8px;">
+            <span style="position:absolute; inset:0; border-radius:50%; background:#4a8b63; animation:wrPulse 1.8s ease-in-out infinite;"></span>
+          </span>
+          <div style="line-height:1.15;">
+            <div style="font-size:12.5px; font-weight:650; color:#2a2823;">OpenForge</div>
+            <div style="font-size:10px; color:#a39e95; letter-spacing:.04em; text-transform:uppercase;">Operating</div>
+          </div>
+        </div>
+        <div style="flex:1; display:flex; align-items:stretch; overflow-x:auto;">
+          <sc-for list="{{ metrics }}" as="m" hint-placeholder-count="7">
+            <div style="flex:1; min-width:96px; padding:9px 16px; border-right:1px solid #eceae5; display:flex; flex-direction:column; gap:2px;">
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span style="width:6px; height:6px; border-radius:50%; background:{{ m.dot }};"></span>
+                <span style="font-size:10px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:#a39e95;">{{ m.label }}</span>
+              </div>
+              <div style="font-size:18px; font-weight:660; letter-spacing:-.01em; color:{{ m.color }}; font-variant-numeric:tabular-nums; transition:color .3s ease;">{{ m.display }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCROLL CONTENT -->
+    <div class="wr-scroll" style="flex:1; overflow-y:auto; padding:0 28px 60px 28px;">
+      <div style="max-width:860px; margin:0 auto;">
+
+        <!-- TITLE -->
+        <div style="padding:48px 0 22px 0;">
+          <div style="font-size:11px; font-weight:600; letter-spacing:.13em; text-transform:uppercase; color:#a39e95; margin-bottom:11px;">New directive</div>
+          <h1 style="margin:0; font-size:27px; font-weight:670; letter-spacing:-.022em; color:#1c1b19;">Where should we begin?</h1>
+          <p style="margin:9px 0 0 0; font-size:14px; color:#76726b; line-height:1.5; max-width:560px;">Brief your workforce. The organization will design its structure, staff the right agents, execute, and report back with decisions for you.</p>
+        </div>
+
+        <!-- INPUT -->
+        <div style="background:#ffffff; border:1.5px solid {{ inputBorder }}; border-radius:14px; box-shadow:{{ inputShadow }}; transition:border-color .18s ease, box-shadow .18s ease; overflow:hidden;">
+          <div style="display:flex; align-items:flex-start; gap:12px; padding:16px 16px 4px 16px;">
+            <button title="Add files or context" style="flex:0 0 auto; width:34px; height:34px; border-radius:9px; border:1px solid #e4e1db; background:#f7f6f3; color:#57544e; cursor:pointer; display:flex; align-items:center; justify-content:center; margin-top:2px;" style-hover="background:#efedea; color:#1c1b19;">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3.2v9.6M3.2 8h9.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+            <textarea value="{{ input }}" onInput="{{ onInput }}" onFocus="{{ onFocus }}" onBlur="{{ onBlur }}" placeholder="Describe the goal for your workforce — e.g. “Launch the OpenForge public beta and operate it for 30 days.”" rows="2" style="flex:1; border:0; outline:none; resize:none; background:transparent; font-family:inherit; font-size:15px; line-height:1.55; color:#1c1b19; padding:7px 0; min-height:48px; max-height:200px;"></textarea>
+          </div>
+
+          <div style="display:flex; flex-wrap:wrap; gap:7px; padding:4px 16px 4px 62px;">
+            <sc-for list="{{ examples }}" as="ex" hint-placeholder-count="2">
+              <button onClick="{{ ex.apply }}" style="border:1px solid #e6e3de; background:#faf9f7; color:#6b675f; border-radius:7px; padding:5px 10px; font-size:12px; cursor:pointer; font-family:inherit; display:flex; align-items:center; gap:6px;" style-hover="background:#f1efeb; color:#3a3833; border-color:#ddd9d2;">
+                <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M8 1.6 9.9 6l4.5.3-3.5 2.9 1.2 4.4L8 11.2 3.9 13.6l1.2-4.4L1.6 6.3 6.1 6z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+                {{ ex.text }}
+              </button>
+            </sc-for>
+          </div>
+
+          <div style="display:flex; align-items:center; justify-content:space-between; padding:10px 16px; margin-top:6px; border-top:1px solid #f0eee9;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="display:inline-flex; align-items:center; gap:6px; background:#f3f1ec; border:1px solid #e6e3de; color:#6b675f; border-radius:7px; padding:5px 9px; font-size:11.5px; font-weight:550;">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="2.5" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.3"/></svg>
+                New task
+              </span>
+              <span style="font-size:11.5px; color:#b3aea4;">{{ charCount }}</span>
+            </div>
+            <button onClick="{{ runDesignOrg }}" style="border:0; background:{{ submitBg }}; color:#ffffff; border-radius:9px; padding:9px 18px; font-size:13.5px; font-weight:650; cursor:{{ submitCursor }}; display:flex; align-items:center; gap:8px; font-family:inherit; box-shadow:0 1px 2px rgba(40,90,60,.22); transition:background .16s ease, opacity .16s ease; opacity:{{ submitOpacity }};" style-hover="filter:brightness(1.05);">
+              <sc-if value="{{ isRunning }}" hint-placeholder-val="{{ false }}">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="animation:wrSpin .8s linear infinite;"><path d="M8 1.8a6.2 6.2 0 1 1-6.2 6.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+              </sc-if>
+              <sc-if value="{{ notRunning }}" hint-placeholder-val="{{ true }}">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.5 8h11M9 3.5 13.5 8 9 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </sc-if>
+              {{ submitLabel }}
+            </button>
+          </div>
+        </div>
+
+        <!-- PIPELINE -->
+        <div style="margin-top:14px; background:{{ pipeBg }}; border:1px solid {{ pipeBorder }}; border-radius:12px; padding:15px 18px; transition:background .25s ease, border-color .25s ease;">
+          <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:14px;">
+            <div style="display:flex; align-items:flex-start; gap:11px;">
+              <div style="flex:0 0 auto; width:30px; height:30px; border-radius:8px; background:{{ pipeIconBg }}; display:flex; align-items:center; justify-content:center; color:{{ pipeIconColor }}; margin-top:1px;">
+                <sc-if value="{{ isRunning }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" style="animation:wrSpin .9s linear infinite;"><path d="M8 1.8a6.2 6.2 0 1 1-6.2 6.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></sc-if>
+                <sc-if value="{{ isFailed }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 4.5v3.8M8 11h.01" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="8" r="6.2" stroke="currentColor" stroke-width="1.4"/></svg></sc-if>
+                <sc-if value="{{ isReady }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M4 8.2 6.8 11 12 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                <sc-if value="{{ isIdle }}" hint-placeholder-val="{{ true }}"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.2" stroke="currentColor" stroke-width="1.4"/><path d="M8 5v3.2l2 1.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+              </div>
+              <div>
+                <div style="font-size:13.5px; font-weight:640; color:{{ pipeTitleColor }};">{{ pipeTitle }}</div>
+                <div style="font-size:12.5px; color:#86827a; margin-top:2px;">{{ pipeSub }}</div>
+              </div>
+            </div>
+            <div style="display:flex; align-items:center; gap:9px;">
+              <sc-if value="{{ isFailed }}" hint-placeholder-val="{{ false }}">
+                <button onClick="{{ runDesignOrg }}" style="border:1px solid #d8b3ae; background:#fff; color:#a8463f; border-radius:8px; padding:6px 12px; font-size:12.5px; font-weight:600; cursor:pointer; font-family:inherit; display:flex; align-items:center; gap:6px;" style-hover="background:#fbf2f0;">
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M13 8a5 5 0 1 1-1.6-3.7M13 2.5V5h-2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Retry
+                </button>
+              </sc-if>
+              <span style="font-size:10.5px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:{{ pipeBadgeColor }}; background:{{ pipeBadgeBg }}; border:1px solid {{ pipeBadgeBorder }}; border-radius:6px; padding:3px 8px;">{{ pipeBadge }}</span>
+            </div>
+          </div>
+
+          <div style="display:flex; align-items:center; gap:0;">
+            <sc-for list="{{ steps }}" as="s" hint-placeholder-count="5">
+              <div style="display:flex; align-items:center; flex:{{ s.flex }}; min-width:0;">
+                <div style="display:flex; flex-direction:column; align-items:center; gap:6px; flex:0 0 auto;">
+                  <span style="width:13px; height:13px; border-radius:50%; background:{{ s.dotBg }}; border:2px solid {{ s.dotBorder }}; box-shadow:{{ s.dotGlow }}; display:flex; align-items:center; justify-content:center; transition:all .25s ease;">
+                    <span style="width:5px; height:5px; border-radius:50%; background:{{ s.innerDot }}; animation:{{ s.innerAnim }};"></span>
+                  </span>
+                  <span style="font-size:11px; font-weight:{{ s.weight }}; color:{{ s.labelColor }}; white-space:nowrap;">{{ s.label }}</span>
+                </div>
+                <sc-if value="{{ s.hasLine }}" hint-placeholder-val="{{ true }}">
+                  <div style="flex:1; height:2px; margin:0 8px; margin-bottom:18px; border-radius:2px; background:{{ s.lineBg }}; background-size:14px 100%; animation:{{ s.lineAnim }};"></div>
+                </sc-if>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <!-- HUMAN REPORTS -->
+        <div style="margin-top:30px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:13px;">
+            <div style="display:flex; align-items:center; gap:9px;">
+              <span style="font-size:11.5px; font-weight:650; letter-spacing:.08em; text-transform:uppercase; color:#76726b;">Human Reports</span>
+              <span style="font-size:11px; font-weight:600; color:#a39e95; background:#eceae5; border-radius:20px; padding:1px 8px; font-variant-numeric:tabular-nums;">{{ reportCount }}</span>
+            </div>
+            <sc-if value="{{ hasReports }}" hint-placeholder-val="{{ true }}">
+              <span style="font-size:11.5px; color:#a39e95;">Submitted to you by the CEO agent</span>
+            </sc-if>
+          </div>
+
+          <sc-if value="{{ hasReports }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex; flex-direction:column; gap:14px;">
+            <sc-for list="{{ reports }}" as="r" hint-placeholder-count="2">
+              <div style="background:#ffffff; border:1px solid {{ r.cardBorder }}; border-radius:12px; box-shadow:0 1px 2px rgba(28,27,25,.04); overflow:hidden;">
+
+                <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:16px 18px 13px 18px; border-bottom:1px solid #f0eee9;">
+                  <div style="display:flex; align-items:flex-start; gap:11px; min-width:0;">
+                    <div style="flex:0 0 auto; width:34px; height:34px; border-radius:9px; background:#262420; color:#f3f1ec; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700;">CEO</div>
+                    <div style="min-width:0;">
+                      <div style="font-size:15px; font-weight:660; color:#1c1b19; letter-spacing:-.01em;">{{ r.title }}</div>
+                      <div style="display:flex; align-items:center; gap:7px; margin-top:3px; flex-wrap:wrap;">
+                        <span style="font-size:11.5px; color:#86827a;">{{ r.role }}</span>
+                        <span style="width:3px; height:3px; border-radius:50%; background:#cfcabf;"></span>
+                        <span style="font-size:11.5px; color:#86827a; font-family:ui-monospace, 'SF Mono', monospace;">{{ r.orgline }}</span>
+                        <span style="width:3px; height:3px; border-radius:50%; background:#cfcabf;"></span>
+                        <span style="font-size:11.5px; color:#a39e95;">{{ r.time }}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div style="display:flex; flex-direction:column; align-items:flex-end; gap:7px; flex:0 0 auto;">
+                    <span style="display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:600; letter-spacing:.03em; color:{{ r.statusColor }}; background:{{ r.statusBg }}; border:1px solid {{ r.statusBorder }}; border-radius:7px; padding:4px 9px;">
+                      <span style="width:6px; height:6px; border-radius:50%; background:{{ r.statusColor }};"></span>{{ r.statusLabel }}
+                    </span>
+                    <div style="display:flex; align-items:center; gap:7px;">
+                      <span style="font-size:10.5px; color:#a39e95; letter-spacing:.03em;">CONFIDENCE</span>
+                      <div style="width:48px; height:5px; border-radius:3px; background:#eceae5; overflow:hidden;"><div style="width:{{ r.confPct }}; height:100%; background:{{ r.accent }}; border-radius:3px;"></div></div>
+                      <span style="font-size:11.5px; font-weight:650; color:#3a3833; font-variant-numeric:tabular-nums;">{{ r.confLabel }}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="padding:15px 18px 6px 18px;">
+                  <div style="font-size:10.5px; font-weight:650; letter-spacing:.07em; text-transform:uppercase; color:#a39e95; margin-bottom:5px;">Summary</div>
+                  <p style="margin:0 0 16px 0; font-size:13.5px; line-height:1.62; color:#3a3833; text-wrap:pretty;">{{ r.summary }}</p>
+
+                  <div style="font-size:10.5px; font-weight:650; letter-spacing:.07em; text-transform:uppercase; color:#a39e95; margin-bottom:8px;">Critical risks</div>
+                  <div style="display:flex; flex-direction:column; gap:7px; margin-bottom:16px;">
+                    <sc-for list="{{ r.risks }}" as="risk" hint-placeholder-count="3">
+                      <div style="display:flex; align-items:flex-start; gap:9px;">
+                        <span style="flex:0 0 auto; margin-top:1px; font-size:9.5px; font-weight:700; letter-spacing:.04em; color:{{ risk.color }}; background:{{ risk.bg }}; border:1px solid {{ risk.border }}; border-radius:5px; padding:2px 6px; min-width:42px; text-align:center;">{{ risk.sevLabel }}</span>
+                        <span style="font-size:13px; line-height:1.55; color:#46443e; text-wrap:pretty;">{{ risk.text }}</span>
+                      </div>
+                    </sc-for>
+                  </div>
+
+                  <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:4px;">
+                    <div>
+                      <div style="font-size:10.5px; font-weight:650; letter-spacing:.07em; text-transform:uppercase; color:#a39e95; margin-bottom:5px;">Recommendation</div>
+                      <p style="margin:0; font-size:13px; line-height:1.55; color:#3a3833; text-wrap:pretty;">{{ r.recommendation }}</p>
+                    </div>
+                    <div>
+                      <div style="font-size:10.5px; font-weight:650; letter-spacing:.07em; text-transform:uppercase; color:#a39e95; margin-bottom:7px;">Next actions</div>
+                      <div style="display:flex; flex-direction:column; gap:5px;">
+                        <sc-for list="{{ r.nextActions }}" as="na" hint-placeholder-count="3">
+                          <div style="display:flex; align-items:flex-start; gap:8px;">
+                            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style="flex:0 0 auto; margin-top:2px; color:#4a8b63;"><path d="M3.5 8.2 6.3 11 12.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            <span style="font-size:12.5px; line-height:1.5; color:#46443e;">{{ na }}</span>
+                          </div>
+                        </sc-for>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <sc-if value="{{ r.needsDecision }}" hint-placeholder-val="{{ false }}">
+                  <div style="margin:14px 18px 16px 18px; background:#fbf7ee; border:1px solid #ecdcb8; border-radius:10px; padding:13px 15px;">
+                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="color:#b07d2f;"><path d="M8 1.8 14.5 13.5H1.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M8 6.3v3M8 11.3h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                      <span style="font-size:11px; font-weight:650; letter-spacing:.06em; text-transform:uppercase; color:#9a6c25;">Human decision required</span>
+                    </div>
+                    <p style="margin:0 0 12px 0; font-size:13.5px; line-height:1.55; color:#5a4d30; font-weight:500; text-wrap:pretty;">{{ r.decisionQuestion }}</p>
+                    <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+                      <button onClick="{{ r.approve }}" style="border:0; background:#3f7d57; color:#fff; border-radius:8px; padding:8px 15px; font-size:12.5px; font-weight:620; cursor:pointer; font-family:inherit; box-shadow:0 1px 2px rgba(40,90,60,.2);" style-hover="background:#356b4a;">{{ r.primaryAction }}</button>
+                      <sc-for list="{{ r.altActions }}" as="alt" hint-placeholder-count="2">
+                        <button onClick="{{ alt.choose }}" style="border:1px solid #ddd6c4; background:#fff; color:#6b5d3a; border-radius:8px; padding:8px 15px; font-size:12.5px; font-weight:560; cursor:pointer; font-family:inherit;" style-hover="background:#f7f1e4;">{{ alt.text }}</button>
+                      </sc-for>
+                      <div style="flex:1;"></div>
+                      <button style="border:0; background:transparent; color:#a08a5a; border-radius:8px; padding:8px 6px; font-size:12px; cursor:pointer; font-family:inherit;" style-hover="color:#6b5d3a;">View full brief →</button>
+                    </div>
+                    <sc-if value="{{ r.decided }}" hint-placeholder-val="{{ false }}">
+                      <div style="margin-top:11px; padding-top:11px; border-top:1px solid #ecdcb8; display:flex; align-items:center; gap:8px; font-size:12.5px; color:#3f7d57; font-weight:550;">
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 8.2 6.8 11 12 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        Decision recorded: {{ r.decidedLabel }} — routed to the workforce.
+                      </div>
+                    </sc-if>
+                  </div>
+                </sc-if>
+
+              </div>
+            </sc-for>
+          </div>
+          </sc-if>
+
+          <sc-if value="{{ noReports }}" hint-placeholder-val="{{ false }}">
+            <div style="background:#ffffff; border:1px dashed #ddd9d2; border-radius:12px; padding:46px 24px; text-align:center;">
+              <div style="width:46px; height:46px; border-radius:12px; background:#f3f1ec; display:flex; align-items:center; justify-content:center; margin:0 auto 14px auto; color:#b3aea4;">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M6 3.5h8l4 4v13H6z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M14 3.5v4h4M9 12h6M9 15.5h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+              </div>
+              <div style="font-size:14.5px; font-weight:620; color:#3a3833;">No reports yet</div>
+              <p style="margin:7px auto 0 auto; font-size:13px; line-height:1.55; color:#86827a; max-width:380px;">Brief your workforce above. When the organization completes work, the CEO agent will compress results into a report and surface any decisions for you here.</p>
+            </div>
+          </sc-if>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <!-- ============ PROTOTYPE SCENARIO PANEL ============ -->
+  <div style="position:fixed; right:18px; bottom:18px; z-index:50; font-family:inherit;">
+    <sc-if value="{{ panelOpen }}" hint-placeholder-val="{{ true }}">
+    <div style="background:#1f1e1b; color:#e9e7e2; border-radius:12px; padding:11px 12px 12px 12px; box-shadow:0 8px 28px rgba(20,18,15,.30); width:208px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:9px;">
+        <span style="font-size:10px; font-weight:650; letter-spacing:.1em; text-transform:uppercase; color:#9b978f;">Prototype states</span>
+        <button onClick="{{ togglePanel }}" style="border:0; background:transparent; color:#9b978f; cursor:pointer; padding:0; display:flex;" style-hover="color:#fff;"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:5px;">
+        <sc-for list="{{ scenarios }}" as="sc" hint-placeholder-count="6">
+          <button onClick="{{ sc.go }}" style="border:1px solid {{ sc.border }}; background:{{ sc.bg }}; color:{{ sc.color }}; border-radius:7px; padding:7px 4px; font-size:11px; font-weight:560; cursor:pointer; font-family:inherit; transition:all .14s ease;">{{ sc.label }}</button>
+        </sc-for>
+      </div>
+      <div style="margin-top:9px; padding-top:9px; border-top:1px solid #34322d; display:flex; align-items:center; justify-content:space-between;">
+        <span style="font-size:11px; color:#9b978f;">Sidebar</span>
+        <button onClick="{{ toggleSidebar }}" style="border:1px solid #3d3a34; background:#2a2823; color:#cfcabf; border-radius:6px; padding:4px 9px; font-size:11px; cursor:pointer; font-family:inherit;" style-hover="background:#34322d;">{{ sidebarLabel }}</button>
+      </div>
+    </div>
+    </sc-if>
+    <sc-if value="{{ panelClosed }}" hint-placeholder-val="{{ false }}">
+      <button onClick="{{ togglePanel }}" style="border:0; background:#1f1e1b; color:#e9e7e2; border-radius:10px; padding:9px 13px; font-size:11.5px; font-weight:600; cursor:pointer; font-family:inherit; box-shadow:0 6px 20px rgba(20,18,15,.28); display:flex; align-items:center; gap:7px;">
+        <span style="width:7px; height:7px; border-radius:50%; background:#4a8b63;"></span>States
+      </button>
+    </sc-if>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:860}}">
+class Component extends DCLogic {
+  state = {
+    mode: 'simple',
+    sidebar: 'expanded',
+    input: '',
+    focused: false,
+    search: '',
+    pipeline: 'idle',
+    pipeStep: 0,
+    failAt: 2,
+    scenario: 'default',
+    selectedId: 't-of-beta',
+    panelOpen: true,
+    metrics: { agents:110, active:2, completed:104, failed:98, queueUsed:0, queueCap:100, tokens:210679, tasks:204 },
+    decided: {},
+  };
+
+  PIPE_STEPS = ['Validate goal','Send request','Wait for model','Render draft','Ready'];
+
+  ALL_TASKS = [
+    { id:'t-of-beta', name:'OpenForge public beta — launch & operate', group:'Today', status:'running' },
+    { id:'t-iso', name:'Tenant isolation security audit', group:'Today', status:'running' },
+    { id:'t-cost', name:'LLM cost guardrail rollout', group:'Today', status:'done' },
+    { id:'t-rev', name:'Q3 revenue model — rebuild & reconcile', group:'Yesterday', status:'done' },
+    { id:'t-onb', name:'Onboarding flow redesign', group:'Yesterday', status:'done' },
+    { id:'t-webhook', name:'Incident: payment webhook retries', group:'Yesterday', status:'failed' },
+    { id:'t-dwh', name:'Data warehouse migration plan', group:'Yesterday', status:'done' },
+    { id:'t-price', name:'Pricing experiment analysis', group:'Earlier', status:'done' },
+    { id:'t-macro', name:'Support macro automation', group:'Earlier', status:'done' },
+    { id:'t-vendor', name:'Vendor risk assessment', group:'Earlier', status:'failed' },
+    { id:'t-mkt', name:'Marketing site refresh', group:'Earlier', status:'done' },
+    { id:'t-rate', name:'API rate-limit policy review', group:'Earlier', status:'done' },
+    { id:'t-crash', name:'Mobile crash triage — v4.2', group:'Earlier', status:'queued' },
+    { id:'t-l10n', name:'Localization rollout (DE / FR / JP)', group:'Earlier', status:'done' },
+    { id:'t-churn', name:'Churn root-cause study', group:'Earlier', status:'done' },
+    { id:'t-soc2', name:'SOC 2 Type II readiness program', group:'Earlier', status:'queued' },
+  ];
+
+  statusTone(s) {
+    if (s === 'running') return { dot:'#b07d2f', glow:'0 0 0 3px rgba(176,125,47,.16)', radius:'50%' };
+    if (s === 'failed')  return { dot:'#b3524b', glow:'none', radius:'2px' };
+    if (s === 'queued')  return { dot:'#a39e95', glow:'none', radius:'50%' };
+    return { dot:'#7fb094', glow:'none', radius:'50%' };
+  }
+
+  fmt(n) { return n.toLocaleString('en-US'); }
+
+  animateMetric(key, to, dur = 600) {
+    const from = this.state.metrics[key];
+    if (from === to) return;
+    const t0 = performance.now();
+    const tick = (now) => {
+      const p = Math.min(1, (now - t0) / dur);
+      const e = 1 - Math.pow(1 - p, 3);
+      const val = Math.round(from + (to - from) * e);
+      this.setState(st => ({ metrics: { ...st.metrics, [key]: val } }));
+      if (p < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+
+  componentWillUnmount() { clearInterval(this._timer); }
+
+  setSimple = () => this.setState({ mode:'simple' });
+  setDebug = () => this.setState({ mode:'debug' });
+  toggleSidebar = () => this.setState(s => ({ sidebar: s.sidebar === 'expanded' ? 'collapsed' : 'expanded' }));
+  togglePanel = () => this.setState(s => ({ panelOpen: !s.panelOpen }));
+  onInput = (e) => this.setState({ input: e.target.value });
+  onSearch = (e) => this.setState({ search: e.target.value });
+  onFocus = () => this.setState({ focused: true });
+  onBlur = () => this.setState({ focused: false });
+  newTask = () => this.setState({ input:'', pipeline:'idle', pipeStep:0, scenario:'default', selectedId:null });
+  select = (id) => this.setState({ selectedId: id });
+
+  runDesignOrg = () => {
+    clearInterval(this._timer);
+    this.setState({ pipeline:'running', pipeStep:0, scenario:'default' });
+    this._timer = setInterval(() => {
+      this.setState(s => {
+        const next = s.pipeStep + 1;
+        if (next >= this.PIPE_STEPS.length - 1) {
+          clearInterval(this._timer);
+          this.animateMetric('active', 7);
+          this.animateMetric('agents', 124);
+          setTimeout(() => { this.animateMetric('tasks', 205); this.animateMetric('completed', 105); }, 400);
+          return { pipeStep: this.PIPE_STEPS.length - 1, pipeline:'ready' };
+        }
+        return { pipeStep: next };
+      });
+    }, 950);
+  };
+
+  goScenario = (name) => {
+    clearInterval(this._timer);
+    if (name === 'idle')         this.setState({ pipeline:'idle', pipeStep:0, scenario:'default' });
+    else if (name === 'running') this.runDesignOrg();
+    else if (name === 'ready')   this.setState({ pipeline:'ready', pipeStep:4, scenario:'default' });
+    else if (name === 'failed')  this.setState({ pipeline:'failed', pipeStep:2, scenario:'default' });
+    else if (name === 'empty')   this.setState({ pipeline:'idle', pipeStep:0, scenario:'empty', search:'' });
+    else if (name === 'decision')this.setState({ pipeline:'ready', pipeStep:4, scenario:'default' });
+  };
+
+  decide = (reportId, label) => this.setState(s => ({ decided: { ...s.decided, [reportId]: label } }));
+
+  buildReports() {
+    if (this.state.scenario === 'empty') return [];
+    const decided = this.state.decided;
+    const beta = {
+      id:'r-beta',
+      title:'OpenForge — public beta readiness',
+      role:'Chief Executive Officer',
+      orgline:'OpenForge · task_001_public_beta',
+      time:'14 min ago',
+      statusKey:'decision',
+      conf:0.92,
+      accent:'#b07d2f',
+      summary:'All 100 agent workstreams have reported in. The compressed validation run surfaced critical risks that need your call before we open the beta. The organization is staffed and ready to proceed either way, pending your decision on scope and timeline.',
+      risks:[
+        { sev:'high', text:'Multi-tenant data isolation — flagged by 40+ agents across security, engineering, product, and compliance. Cross-tenant code-leakage risk is not yet resolved.' },
+        { sev:'high', text:'Inference cost runs 40–60% of projected spend and could spike under multi-tenant load, threatening the $340K beta budget.' },
+        { sev:'med', text:'SRE / DevOps staffed at 50% of plan — single points of failure during launch week.' },
+        { sev:'med', text:'No SOC 2 Type II audit completed; may block enterprise adoption.' },
+      ],
+      recommendation:'Open a gated private beta with 3–5 design partners rather than full public access. Enforce go/no-go gates on tenant-isolation tests and cost guardrails before each cohort.',
+      nextActions:[
+        'Convene a C-suite go/no-go within 24h',
+        'Stand up tenant-isolation test gate',
+        'Approve emergency SRE hire + cost guardrails',
+        'Prepare an isolation-failure contingency',
+      ],
+      needsDecision:true,
+      decisionQuestion:'Extend the timeline 2–4 weeks to complete security validation, or launch now with a gated private beta of 3–5 design partners?',
+      primaryAction:'Approve gated private beta',
+      altActions:['Extend 2–4 weeks','Request more detail'],
+      decidedLabel: decided['r-beta'] || null,
+    };
+    const rev = {
+      id:'r-rev',
+      title:'Q3 revenue model — rebuild complete',
+      role:'Chief Executive Officer',
+      orgline:'Atlas Finance · task_q3_model',
+      time:'2h ago',
+      statusKey:'completed',
+      conf:0.88,
+      accent:'#4a8b63',
+      summary:'Revenue model rebuilt and reconciled against actuals. Variance is within 1.4% across all segments. No human decision required — adopting as source of truth for Q3 board reporting unless you object.',
+      risks:[
+        { sev:'low', text:'Two upstream data feeds are still manual; automate before the Q4 close to avoid drift.' },
+      ],
+      recommendation:'Adopt the rebuilt model as the source of truth for Q3 board reporting and publish to the board data room.',
+      nextActions:[ 'Publish to board data room', 'Schedule Q4 feed automation' ],
+      needsDecision:false,
+      decidedLabel:null,
+    };
+    return [beta, rev];
+  }
+
+  reportStatusTone(k) {
+    if (k === 'decision')  return { label:'Decision needed', color:'#a8742a', bg:'#fbf3e3', border:'#ecdcb8' };
+    if (k === 'blocked')   return { label:'Blocked', color:'#a8463f', bg:'#fbeeec', border:'#ecccc7' };
+    return { label:'Completed', color:'#3f7d57', bg:'#ecf4ee', border:'#cfe3d6' };
+  }
+  riskTone(sev) {
+    if (sev === 'high') return { sevLabel:'HIGH', color:'#a8463f', bg:'#fbeeec', border:'#ecccc7' };
+    if (sev === 'med')  return { sevLabel:'MED', color:'#a8742a', bg:'#fbf3e3', border:'#ecdcb8' };
+    return { sevLabel:'LOW', color:'#6b675f', bg:'#f1efea', border:'#e0dcd4' };
+  }
+
+  renderVals() {
+    const s = this.state;
+    const isSimple = s.mode === 'simple';
+    const expanded = s.sidebar === 'expanded';
+
+    const m = s.metrics;
+    const metrics = [
+      { label:'Agents', display:this.fmt(m.agents), color:'#1c1b19', dot:'#cfcabf' },
+      { label:'Active', display:this.fmt(m.active), color:'#3f7d57', dot:'#4a8b63' },
+      { label:'Completed', display:this.fmt(m.completed), color:'#1c1b19', dot:'#cfcabf' },
+      { label:'Failed', display:this.fmt(m.failed), color:'#a8463f', dot:'#b3524b' },
+      { label:'Queue', display:m.queueUsed + '/' + m.queueCap, color:'#1c1b19', dot:'#cfcabf' },
+      { label:'Tokens', display:this.fmt(m.tokens), color:'#1c1b19', dot:'#cfcabf' },
+      { label:'Tasks', display:this.fmt(m.tasks), color:'#1c1b19', dot:'#cfcabf' },
+    ];
+
+    const q = s.search.trim().toLowerCase();
+    const filtered = this.ALL_TASKS.filter(t => !q || t.name.toLowerCase().includes(q));
+    const visible = s.scenario === 'empty' ? [] : filtered;
+    const order = ['Today','Yesterday','Earlier'];
+    const groups = order.map(label => ({
+      label,
+      items: visible.filter(t => t.group === label).map(t => {
+        const tone = this.statusTone(t.status);
+        const sel = t.id === s.selectedId;
+        return {
+          name:t.name, dot:tone.dot, dotGlow:tone.glow, dotRadius:tone.radius,
+          bg: sel ? '#e0ddd5' : 'transparent',
+          color: sel ? '#1c1b19' : '#46443e',
+          weight: sel ? 600 : 450,
+          select: () => this.select(t.id),
+        };
+      }),
+    })).filter(g => g.items.length > 0);
+
+    const collapsedDots = visible.map(t => {
+      const tone = this.statusTone(t.status);
+      const sel = t.id === s.selectedId;
+      return { name:t.name, dot:tone.dot, dotGlow:tone.glow, dotRadius:tone.radius, bg: sel ? '#e0ddd5':'transparent', select:()=>this.select(t.id) };
+    });
+    const noResults = s.scenario !== 'empty' && q && groups.length === 0;
+
+    const inputBorder = s.focused ? '#7fb094' : '#e6e3de';
+    const inputShadow = s.focused ? '0 0 0 4px rgba(74,139,99,.12), 0 1px 2px rgba(28,27,25,.04)' : '0 1px 2px rgba(28,27,25,.03)';
+    const isRunning = s.pipeline === 'running';
+    const charCount = s.input.length > 0 ? (s.input.length + ' chars') : '';
+
+    const examples = [
+      { text:'Launch the OpenForge public beta', apply:()=>this.setState({input:'Launch the OpenForge public beta and operate it for 30 days. Prioritize tenant isolation, cost control, and reliability.'}) },
+      { text:'Rebuild the Q3 revenue model', apply:()=>this.setState({input:'Rebuild and reconcile the Q3 revenue model against actuals, then prepare it for board reporting.'}) },
+    ];
+
+    let pipeBg='#faf9f7', pipeBorder='#e9e6e1', pipeTitle='No design request running', pipeSub='Brief the workforce above and run Design Org to generate a draft organization.',
+        pipeBadge='IDLE', pipeBadgeColor='#86827a', pipeBadgeBg='#f1efea', pipeBadgeBorder='#e0dcd4',
+        pipeIconBg='#eceae5', pipeIconColor='#86827a', pipeTitleColor='#46443e';
+    if (isRunning) {
+      pipeBg='#fbf9f4'; pipeBorder='#ece2cc'; pipeTitle='Designing the organization…'; pipeSub='Structuring departments and staffing agents for your goal.';
+      pipeBadge='RUNNING'; pipeBadgeColor='#a8742a'; pipeBadgeBg='#fbf3e3'; pipeBadgeBorder='#ecdcb8'; pipeIconBg='#f6ecd4'; pipeIconColor='#a8742a'; pipeTitleColor='#7a5a1f';
+    } else if (s.pipeline === 'failed') {
+      pipeBg='#fdf6f5'; pipeBorder='#eccfca'; pipeTitle='Design request failed'; pipeSub='Model request timed out at “Wait for model”. No draft was produced.';
+      pipeBadge='FAILED'; pipeBadgeColor='#a8463f'; pipeBadgeBg='#fbeeec'; pipeBadgeBorder='#ecccc7'; pipeIconBg='#f7e3e0'; pipeIconColor='#a8463f'; pipeTitleColor='#8f3d37';
+    } else if (s.pipeline === 'ready') {
+      pipeBg='#f6faf7'; pipeBorder='#d2e4d8'; pipeTitle='Draft organization ready'; pipeSub='124 agents staffed across 9 departments. Review the structure or start the run.';
+      pipeBadge='READY'; pipeBadgeColor='#3f7d57'; pipeBadgeBg='#ecf4ee'; pipeBadgeBorder='#cfe3d6'; pipeIconBg='#dff0e5'; pipeIconColor='#3f7d57'; pipeTitleColor='#2f6043';
+    }
+
+    const failAt = s.failAt;
+    const steps = this.PIPE_STEPS.map((label, i) => {
+      const last = i === this.PIPE_STEPS.length - 1;
+      let st = 'upcoming';
+      if (s.pipeline === 'idle') st = 'idle';
+      else if (s.pipeline === 'failed') { st = i < failAt ? 'done' : (i === failAt ? 'failed' : 'upcoming'); }
+      else if (s.pipeline === 'ready') st = 'done';
+      else { st = i < s.pipeStep ? 'done' : (i === s.pipeStep ? 'current' : 'upcoming'); }
+
+      const map = {
+        idle:    { dotBg:'#f1efea', dotBorder:'#ddd9d2', innerDot:'transparent', innerAnim:'none', labelColor:'#a39e95', weight:450, dotGlow:'none' },
+        done:    { dotBg:'#4a8b63', dotBorder:'#4a8b63', innerDot:'#ffffff', innerAnim:'none', labelColor:'#46443e', weight:550, dotGlow:'none' },
+        current: { dotBg:'#fff', dotBorder:'#b07d2f', innerDot:'#b07d2f', innerAnim:'wrPulse 1.1s ease-in-out infinite', labelColor:'#7a5a1f', weight:650, dotGlow:'0 0 0 4px rgba(176,125,47,.16)' },
+        failed:  { dotBg:'#b3524b', dotBorder:'#b3524b', innerDot:'#ffffff', innerAnim:'none', labelColor:'#8f3d37', weight:650, dotGlow:'0 0 0 4px rgba(179,82,75,.16)' },
+        upcoming:{ dotBg:'#f1efea', dotBorder:'#ddd9d2', innerDot:'transparent', innerAnim:'none', labelColor:'#b3aea4', weight:450, dotGlow:'none' },
+      };
+      const v = map[st];
+      const lineDone = (st === 'done');
+      let lineBg = '#e0dcd4';
+      let lineAnim = 'none';
+      if (lineDone) lineBg = '#bcdcc7';
+      if (st === 'current' && s.pipeline === 'running') {
+        lineBg = 'repeating-linear-gradient(90deg,#d8b878 0 7px,transparent 7px 14px)';
+        lineAnim = 'wrFlow .6s linear infinite';
+      }
+      if (s.pipeline === 'failed' && i < failAt) lineBg = '#bcdcc7';
+      return {
+        label, flex: last ? '0 0 auto' : 1, hasLine: !last,
+        dotBg:v.dotBg, dotBorder:v.dotBorder, innerDot:v.innerDot, innerAnim:v.innerAnim, dotGlow:v.dotGlow,
+        labelColor:v.labelColor, weight:v.weight, lineBg, lineAnim,
+      };
+    });
+
+    const rawReports = this.buildReports();
+    const reports = rawReports.map(r => {
+      const tone = this.reportStatusTone(r.statusKey);
+      const decidedLabel = r.decidedLabel;
+      return {
+        title:r.title, role:r.role, orgline:r.orgline, time:r.time,
+        accent:r.accent, summary:r.summary, recommendation:r.recommendation,
+        nextActions:r.nextActions, needsDecision:r.needsDecision,
+        statusLabel:tone.label, statusColor:tone.color, statusBg:tone.bg, statusBorder:tone.border,
+        cardBorder:'#e6e3de',
+        confPct: Math.round(r.conf*100) + '%', confLabel: r.conf.toFixed(2),
+        risks: r.risks.map(rk => { const rt = this.riskTone(rk.sev); return { sevLabel:rt.sevLabel, color:rt.color, bg:rt.bg, border:rt.border, text:rk.text }; }),
+        decisionQuestion:r.decisionQuestion, primaryAction:r.primaryAction,
+        approve: () => this.decide(r.id, r.primaryAction),
+        altActions: (r.altActions||[]).map(a => ({ text:a, choose: () => this.decide(r.id, a) })),
+        decided: !!decidedLabel, decidedLabel: decidedLabel,
+      };
+    });
+
+    const hasReports = reports.length > 0;
+
+    const scnDefs = [
+      { key:'idle', label:'Idle' },
+      { key:'running', label:'Designing' },
+      { key:'ready', label:'Ready' },
+      { key:'failed', label:'Failed' },
+      { key:'decision', label:'Decision' },
+      { key:'empty', label:'Empty' },
+    ];
+    const activeScn = s.scenario === 'empty' ? 'empty' : s.pipeline;
+    const scenarios = scnDefs.map(d => {
+      const on = (d.key === activeScn) || (d.key === 'decision' && s.scenario !== 'empty' && s.pipeline === 'ready');
+      return {
+        label:d.label,
+        go: () => this.goScenario(d.key),
+        bg: on ? '#3a4a40' : '#2a2823',
+        border: on ? '#4a8b63' : '#3d3a34',
+        color: on ? '#cfe6d6' : '#cfcabf',
+      };
+    });
+
+    return {
+      expanded, collapsed: !expanded,
+      modeShift: isSimple ? '0%' : '100%',
+      simpleColor: isSimple ? '#1c1b19' : '#8a867f',
+      debugColor: isSimple ? '#8a867f' : '#1c1b19',
+      setSimple:this.setSimple, setDebug:this.setDebug, toggleSidebar:this.toggleSidebar, newTask:this.newTask,
+      search:s.search, onSearch:this.onSearch, taskCount: visible.length,
+      groups, collapsedDots, noResults,
+      metrics,
+      input:s.input, onInput:this.onInput, onFocus:this.onFocus, onBlur:this.onBlur,
+      inputBorder, inputShadow, examples, charCount,
+      runDesignOrg:this.runDesignOrg,
+      isRunning, notRunning: !isRunning,
+      submitBg: isRunning ? '#6f8a78' : '#3f7d57',
+      submitCursor: isRunning ? 'default' : 'pointer',
+      submitOpacity: isRunning ? '.85' : '1',
+      submitLabel: isRunning ? 'Designing…' : 'Design Org',
+      pipeBg, pipeBorder, pipeTitle, pipeSub, pipeBadge, pipeBadgeColor, pipeBadgeBg, pipeBadgeBorder,
+      pipeIconBg, pipeIconColor, pipeTitleColor,
+      isFailed: s.pipeline==='failed', isReady: s.pipeline==='ready', isIdle: s.pipeline==='idle',
+      steps,
+      reports, hasReports, noReports: !hasReports, reportCount: reports.length,
+      scenarios,
+      panelOpen:s.panelOpen, panelClosed: !s.panelOpen, togglePanel:this.togglePanel,
+      sidebarLabel: expanded ? 'Collapse' : 'Expand',
+    };
+  }
+}
+</script>
+</body>
+</html>
